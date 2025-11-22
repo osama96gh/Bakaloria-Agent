@@ -26,7 +26,12 @@ COPY api.py ./
 
 # Copy .env file if it exists (for local development)
 # In production, use environment variables or secrets
-COPY teacher_agent/.env ./teacher_agent/.env
+# Note: If .env doesn't exist, Docker build will still work as docker-compose handles env vars
+COPY .env* ./
+
+# Copy Google Cloud credentials file
+# This is needed for accessing Google Cloud Storage
+COPY bakaloria-ai-assistance-key.json ./
 
 # Create a non-root user to run the application
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

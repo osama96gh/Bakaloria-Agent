@@ -16,6 +16,7 @@
 
 import os
 import asyncio
+from pathlib import Path
 from dotenv import load_dotenv
 from google.adk.agents.llm_agent import Agent
 from google.adk.runners import Runner
@@ -25,7 +26,15 @@ from google.genai import types
 from .tools import get_book_page
 
 # Load environment variables from .env file
-load_dotenv()
+# Try to load from parent directory first (for local dev), then from /app (for Docker)
+env_path = Path(__file__).parent.parent / '.env'
+if not env_path.exists():
+    env_path = Path('/app/.env')
+    if not env_path.exists():
+        # Fallback to default behavior (searches in current dir and parent dirs)
+        env_path = None
+
+load_dotenv(dotenv_path=env_path)
 
 # Verify that required environment variables are loaded
 required_env_vars = ['ANTHROPIC_API_KEY']

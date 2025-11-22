@@ -13,6 +13,9 @@ env/
 .env
 *.env
 
+# Google Cloud credentials
+bakaloria-ai-assistance-key.json
+
 # IDE
 .vscode/
 .idea/

@@ -6,10 +6,11 @@ services:
     container_name: book-assistant-api
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
-      # Pass environment variables from host or .env file
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
+      # Additional environment variables (these override env_file if needed)
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/bakaloria-ai-assistance-key.json
     restart: unless-stopped
     networks:
       - app-network
