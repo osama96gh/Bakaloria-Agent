@@ -1,10 +1,6 @@
-version: '3.8'
-
 services:
   book-assistant-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: osama96gh/bakaloria-agent:latest
     container_name: book-assistant-api
     ports:
       - "8000:8000"
@@ -12,18 +8,11 @@ services:
       # Pass environment variables from host or .env file
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
-    volumes:
-      # Mount credentials file if needed for GCS access
-      # Uncomment and adjust path if you have a service account key
-      # - ./path/to/credentials.json:/app/credentials.json:ro
-      
-      # Mount .env file for API keys
-      - ./teacher_agent/.env:/app/.env:ro
     restart: unless-stopped
     networks:
       - app-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
