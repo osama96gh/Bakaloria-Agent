@@ -1,6 +1,8 @@
 services:
   book-assistant-api:
-    image: osama96gh/bakaloria-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: book-assistant-api
     ports:
       - "8000:8000"
