@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  book-assistant-api:
+    # Use the pre-built image from Docker Hub
+    image: osama96gh/bakaloria-agent:latest
+    
+    container_name: book-assistant-api
+    
+    ports:
+      - "8000:8000"
+    
+    environment:
+      # These environment variables will be set in Hostinger's Docker Manager
+      # You can set them through the Hostinger interface or include them here
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
+    
+    volumes:
+      # Mount credentials file if needed for GCS access
+      # Note: You'll need to upload these files to your VPS first
+      # - /path/on/vps/credentials.json:/app/credentials.json:ro
+      
+      # Mount .env file for API keys
+      # Note: Upload the .env file to your VPS and update the path
+      # - /path/on/vps/.env:/app/.env:ro
+    
+    restart: unless-stopped
+    
+    networks:
+      - app-network
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  app-network:
+    driver: bridge
