@@ -175,3 +175,49 @@ def sanitize_markdown(text: str) -> str:
     # For now, return plain text (Telegram handles Arabic RTL automatically)
     # Future: could add HTML formatting support
     return text
+
+
+def sanitize_html_for_telegram(text: str) -> str:
+    """
+    Sanitize HTML for Telegram's limited HTML parser.
+
+    Telegram only supports: <b>, <strong>, <i>, <em>, <u>, <ins>,
+    <s>, <strike>, <del>, <a>, <code>, <pre>, <blockquote>, <tg-spoiler>.
+
+    This function converts unsupported tags like <br> to appropriate
+    alternatives (newlines) and removes other unsupported tags.
+
+    Args:
+        text: HTML text to sanitize
+
+    Returns:
+        Sanitized HTML safe for Telegram
+
+    Example:
+        >>> sanitize_html_for_telegram("Hello<br>World")
+        'Hello\\nWorld'
+    """
+    # Convert <br>, <br/>, <br /> tags to newlines
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+
+    # List of supported Telegram HTML tags
+    supported_tags = {
+        'b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del',
+        'a', 'code', 'pre', 'blockquote', 'tg-spoiler', 'span'
+    }
+
+    # Remove unsupported HTML tags while keeping their content
+    def replace_unsupported_tag(match):
+        tag_name = match.group(1).lower()
+        if tag_name in supported_tags:
+            return match.group(0)  # Keep supported tags
+        return ''  # Remove unsupported tags
+
+    # Match opening tags (with optional attributes)
+    text = re.sub(
+        r'<(/?)(\w+)([^>]*)>',
+        lambda m: m.group(0) if m.group(2).lower() in supported_tags else '',
+        text
+    )
+
+    return text

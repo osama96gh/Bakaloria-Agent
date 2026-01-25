@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Service module for exposing the Educational Assistant Agent as a Python function.
+"""Service module for exposing the Supportive Educational Companion as a Python function.
 
 This module provides a programmatic interface to the ADK agent, following the
 ADK Runtime's Event Loop pattern for proper state management and event processing.
@@ -33,11 +33,11 @@ async def process_agent_query(
     query: str,
     user_id: str = "default_user",
     session_id: Optional[str] = None,
-    app_name: str = "educational_assistant",
+    app_name: str = "educational_companion",
     image_data: Optional[bytes] = None,
     image_mime_type: str = "image/jpeg"
 ) -> Dict[str, Any]:
-    """Process a user query through the Educational Assistant Agent.
+    """Process a user query through the Supportive Educational Companion.
 
     This function exposes the ADK agent as a Python function, following the
     ADK Runtime's Event Loop pattern. It handles:
@@ -176,7 +176,7 @@ async def ask_agent(
     query: str,
     session_id: Optional[str] = None
 ) -> str:
-    """Simple interface to ask the Educational Assistant Agent a question.
+    """Simple interface to ask the Supportive Educational Companion a question.
 
     This is a convenience wrapper around process_agent_query that
     returns just the text response.

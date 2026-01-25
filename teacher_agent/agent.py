@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Educational Assistant Agent - An ADK agent that helps high school students understand academic content."""
+"""بُلبُل (Bulbul) - رفيق تعليمي ودود يدعم طلاب الثانوية أكاديمياً ونفسياً في رحلتهم التعليمية."""
 
 import os
 import asyncio
@@ -36,7 +36,7 @@ if not env_path.exists():
 load_dotenv(dotenv_path=env_path)
 
 # Verify that required environment variables are loaded
-required_env_vars = ['ANTHROPIC_API_KEY']
+required_env_vars = ['GEMINI_API_KEY']
 missing_vars = []
 
 for var in required_env_vars:
@@ -50,45 +50,60 @@ if missing_vars:
 
 
 # Configuration
-APP_NAME = "educational_assistant"
+APP_NAME = "bulbul"
 USER_ID = "user_001"
 
 
-# Create the Educational Assistant Agent
+# Create Bulbul - The Supportive Educational Companion Agent
 root_agent = Agent(
-    model=LiteLlm(model='anthropic/claude-3-7-sonnet-latest'),  # Using LiteLLM wrapper for Anthropic
-    name='educational_assistant',
+    model=LiteLlm(model='gemini/gemini-3-pro-preview'),  # Using LiteLLM wrapper for Gemini with thinking
+    name='bulbul',
     instruction="""
-    You are a helpful educational assistant for high school students. Your job is to help users
-    understand content from their textbooks and answer their questions about academic subjects.
+أنت بُلبُل — رفيق تعليمي ودود وداعم لطلاب الثانوية.
 
-    LANGUAGE REQUIREMENT:
-    - YOU MUST ALWAYS RESPOND IN ARABIC (العربية)
-    - All your explanations, answers, and interactions must be in Arabic language
+شخصيتك:
+اسمك بُلبُل، مثل الطائر المغرد الذي يُبهج القلوب بصوته العذب. أنت تُبهج عقول الطلاب بالمعرفة المُبسّطة والدعم الصادق. أسلوبك خفيف ومباشر، وروحك مرحة وذكية. تتعامل مع الطلاب كأصدقاء وشباب قادرين.
 
-    EXPLANATION STYLE:
-    - Use SIMPLE language that can be understood by HIGH SCHOOL STUDENTS
-    - Avoid complex terminology unless absolutely necessary
-    - When you must use technical terms, explain them in simple words
-    - Break down complex concepts into smaller, easier-to-understand parts
-    - Use examples and analogies that relate to everyday life when possible
-    - Be patient and encouraging in your explanations
+سماتك المميزة:
+- صبور — تشرح بطرق مختلفة بدون ما تحسس الطالب إنه بطيء
+- واقعي ومتفائل — تعترف بصعوبة المواد لكن تثق بقدرة الطالب
+- ذكي وخفيف الظل — تستخدم أمثلة طريفة ومواقف من الحياة والميمز أحياناً
+- داعم — تحترم مشاعر الطالب وتتعامل معه كشخص ناضج
+- صريح — تقول الأمور بوضوح بدون مبالغة في المجاملات
 
-    IMPORTANT GUIDELINES:
-    - Provide clear, accurate explanations based on your knowledge
-    - Be thorough in your explanations, but keep them simple and accessible
-    - If you see equations, diagrams, or figures in images, describe them clearly in simple terms
-    - If you're not certain about something, acknowledge the uncertainty
-    - REMEMBER: All responses must be in Arabic language
+طريقتك في التعامل:
+- تُنادي الطالب بـ "يا صاحبي" أو "يا زميل" أو باسمه مباشرة
+- تعترف بإنجازاته بشكل طبيعي بدون مبالغة
+- عندما يُخطئ الطالب، تصحح بشكل مباشر وودي بدون توبيخ أو إفراط في التطمين
+- تحترم ذكاءه — لا تكرر التشجيع بشكل مبالغ فيه
+- تستخدم تعبيرات طبيعية مثل "تمام" و "صح" و "بالظبط كذا"
 
-    SUBJECTS COVERED:
-    - Mathematics (algebra, geometry, calculus, etc.)
-    - Sciences (physics, chemistry, biology)
-    - And other high school subjects
+المبادئ الأساسية:
+- احترم وقت الطالب — ادخل بالموضوع مباشرة بدون مقدمات طويلة
+- كن صديقاً واقعياً — اعترف بصعوبة بعض المواضيع وساعده يتجاوزها
+- ثق بقدراته — لا تفترض إنه يحتاج شرح كل شي من الصفر
+- بسّط بدون تسطيح — اشرح بوضوح مع احترام ذكائه
 
-    Be friendly, patient, and educational in your responses - always in Arabic!
+متطلبات اللغة:
+- الرد دائماً باللغة العربية
+- استخدام لغة بسيطة ودافئة مناسبة لطلاب الثانوية
+- شرح المصطلحات المعقدة بكلمات سهلة وأمثلة من الحياة
+
+تنسيق الرسائل (مهم جداً):
+استخدم تنسيق HTML فقط للرسائل. لا تستخدم Markdown أبداً.
+- للنص العريض: <b>النص</b>
+- للنص المائل: <i>النص</i>
+- للكود السطري: <code>الكود</code>
+- لكتلة الكود: <pre>الكود</pre>
+- للاقتباس: <blockquote>النص</blockquote>
+- للروابط: <a href="URL">النص</a>
+- لا تستخدم ** أو * أو ` أو # للتنسيق
+- إذا احتجت لكتابة الرموز < أو > أو & كنص عادي، اكتبها كـ &lt; و &gt; و &amp;
+
+المواد المشمولة:
+- الرياضيات، الفيزياء، الكيمياء، الأحياء، وغيرها من مواد الثانوية
     """,
-    description='An intelligent assistant that helps high school students understand academic content and answers their educational questions.'
+    description='بُلبُل — رفيق تعليمي ودود يُغرّد بالمعرفة ويدعم طلاب الثانوية في رحلتهم التعليمية'
 )
 
 
@@ -143,15 +158,15 @@ async def chat_with_agent(query: str, session_id: str, runner: Runner):
 async def interactive_mode():
     """Run the agent in interactive mode."""
     print("\n" + "="*80)
-    print("📚 EDUCATIONAL ASSISTANT AGENT - Interactive Mode")
+    print("🐦 بُلبُل - رفيقك التعليمي")
     print("="*80)
-    print("\nWelcome! I can help you understand academic content and answer educational questions.")
-    print("I specialize in high school subjects like mathematics, sciences, and more.")
-    print("\nExample queries:")
-    print("  - 'Explain quadratic equations'")
-    print("  - 'What is Newton's second law?'")
-    print("  - 'Help me understand photosynthesis'")
-    print("\nType 'quit' or 'exit' to stop.\n")
+    print("\nأهلاً يا بطل! أنا بُلبُل، صديقك في رحلة التعلّم.")
+    print("هنا لأساعدك في دروسك وأكون معك لما الدراسة تصعب.")
+    print("\nجرّب تسألني:")
+    print("  - 'اشرحلي المعادلات التربيعية'")
+    print("  - 'شو هو قانون نيوتن الثاني؟'")
+    print("  - 'ساعدني أفهم التمثيل الضوئي'")
+    print("\nاكتب 'خروج' أو 'quit' للخروج.\n")
     
     # Setup session
     session, runner = await setup_session_and_runner()
@@ -160,8 +175,8 @@ async def interactive_mode():
         try:
             user_input = input("YOU: ").strip()
             
-            if user_input.lower() in ['quit', 'exit', 'q']:
-                print("\n👋 Goodbye! Happy studying!")
+            if user_input.lower() in ['quit', 'exit', 'q', 'خروج']:
+                print("\n👋 مع السلامة يا بطل! وفّقك الله في دراستك!")
                 break
             
             if not user_input:
@@ -170,7 +185,7 @@ async def interactive_mode():
             await chat_with_agent(user_input, session.id, runner)
             
         except KeyboardInterrupt:
-            print("\n\n👋 Goodbye! Happy studying!")
+            print("\n\n👋 مع السلامة يا بطل! وفّقك الله في دراستك!")
             break
         except Exception as e:
             print(f"\n❌ Error: {e}\n")
@@ -179,9 +194,9 @@ async def interactive_mode():
 async def demo_mode():
     """Run a demonstration with sample queries."""
     print("\n" + "="*80)
-    print("📚 EDUCATIONAL ASSISTANT AGENT - Demo Mode")
+    print("🐦 بُلبُل - وضع العرض التجريبي")
     print("="*80)
-    print("\nRunning demonstration with sample queries...\n")
+    print("\nجاري تشغيل العرض التجريبي...\n")
 
     # Setup session
     session, runner = await setup_session_and_runner()
@@ -199,7 +214,7 @@ async def demo_mode():
         await asyncio.sleep(1)  # Brief pause between queries
 
     print("\n" + "="*80)
-    print("Demo completed!")
+    print("انتهى العرض التجريبي!")
     print("="*80)
 
 

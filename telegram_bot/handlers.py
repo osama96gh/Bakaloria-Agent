@@ -17,7 +17,12 @@ from teacher_agent import process_agent_query
 
 from .config import APP_NAME
 from .session_manager import SessionManager
-from .utils import format_error_message, log_user_interaction, split_message
+from .utils import (
+    format_error_message,
+    log_user_interaction,
+    sanitize_html_for_telegram,
+    split_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -243,12 +248,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 duration=duration,
             )
 
-            # Split message if too long
-            chunks = split_message(response_text)
+            # Sanitize HTML for Telegram and split message if too long
+            sanitized_response = sanitize_html_for_telegram(response_text)
+            chunks = split_message(sanitized_response)
 
-            # Send message(s) to user
+            # Send message(s) to user with HTML formatting
             for i, chunk in enumerate(chunks):
-                await update.message.reply_text(chunk)
+                await update.message.reply_text(chunk, parse_mode='HTML')
 
                 # Small delay between chunks for better UX
                 if i < len(chunks) - 1:
@@ -379,12 +385,13 @@ async def handle_photo_message(
                 duration=duration,
             )
 
-            # Split message if too long
-            chunks = split_message(response_text)
+            # Sanitize HTML for Telegram and split message if too long
+            sanitized_response = sanitize_html_for_telegram(response_text)
+            chunks = split_message(sanitized_response)
 
-            # Send message(s) to user
+            # Send message(s) to user with HTML formatting
             for i, chunk in enumerate(chunks):
-                await update.message.reply_text(chunk)
+                await update.message.reply_text(chunk, parse_mode='HTML')
 
                 # Small delay between chunks for better UX
                 if i < len(chunks) - 1:
