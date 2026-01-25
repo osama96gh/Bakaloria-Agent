@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Service module for exposing the Book Assistant Agent as a Python function.
+"""Service module for exposing the Educational Assistant Agent as a Python function.
 
 This module provides a programmatic interface to the ADK agent, following the
 ADK Runtime's Event Loop pattern for proper state management and event processing.
@@ -29,40 +29,40 @@ async def process_agent_query(
     query: str,
     user_id: str = "default_user",
     session_id: Optional[str] = None,
-    app_name: str = "book_assistant"
+    app_name: str = "educational_assistant"
 ) -> Dict[str, Any]:
-    """Process a user query through the Book Assistant Agent.
-    
+    """Process a user query through the Educational Assistant Agent.
+
     This function exposes the ADK agent as a Python function, following the
     ADK Runtime's Event Loop pattern. It handles:
     - Session creation/management via SessionService
     - Event processing through the Runner
     - State commitment through the event loop
     - Response collection from yielded events
-    
+
     Args:
-        query: The user's question about book content
+        query: The user's academic question
         user_id: User identifier for session management
         session_id: Optional session ID for conversation continuity
         app_name: Application name for session management
-        
+
     Returns:
         Dictionary containing:
             - response: The agent's text response
             - session_id: Session ID for future queries
             - status: "success" or "error"
             - error: Error message if status is "error"
-            
+
     Example:
         >>> import asyncio
         >>> from teacher_agent.service import process_agent_query
-        >>> 
+        >>>
         >>> async def main():
-        ...     result = await process_agent_query("What is on page 5 of math-1?")
+        ...     result = await process_agent_query("What is the Pythagorean theorem?")
         ...     print(result["response"])
         ...     # Use session_id for follow-up questions
         ...     follow_up = await process_agent_query(
-        ...         "Can you explain more?", 
+        ...         "Can you explain more?",
         ...         session_id=result["session_id"]
         ...     )
         ...     print(follow_up["response"])
@@ -160,23 +160,23 @@ async def ask_agent(
     query: str,
     session_id: Optional[str] = None
 ) -> str:
-    """Simple interface to ask the Book Assistant Agent a question.
-    
+    """Simple interface to ask the Educational Assistant Agent a question.
+
     This is a convenience wrapper around process_agent_query that
     returns just the text response.
-    
+
     Args:
-        query: The question about book content
+        query: The academic question
         session_id: Optional session ID for conversation continuity
-        
+
     Returns:
         The agent's response as a string
-        
+
     Example:
         >>> import asyncio
         >>> from teacher_agent.service import ask_agent
-        >>> 
-        >>> response = await ask_agent("What is on page 10 of math-2?")
+        >>>
+        >>> response = await ask_agent("What is quadratic formula?")
         >>> print(response)
     """
     result = await process_agent_query(query, session_id=session_id)

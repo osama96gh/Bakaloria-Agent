@@ -1,26 +1,5 @@
 services:
-  book-assistant-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: book-assistant-api
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    environment:
-      # Additional environment variables (these override env_file if needed)
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/bakaloria-ai-assistance-key.json
+  bot:
+    build: .
+    env_file: .env
     restart: unless-stopped
-    networks:
-      - app-network
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
-networks:
-  app-network:
-    driver: bridge
