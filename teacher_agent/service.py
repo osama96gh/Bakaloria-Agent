@@ -146,7 +146,8 @@ async def process_agent_query(
             
             if event.content and event.content.parts:
                 for part in event.content.parts:
-                    if part.text:
+                    # Skip thinking/reasoning parts - only include actual response
+                    if part.text and not getattr(part, 'thought', False):
                         response_parts.append(part.text)
             
             # The final response is marked by is_final_response()

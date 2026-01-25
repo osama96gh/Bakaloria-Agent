@@ -11,6 +11,7 @@ from typing import Optional
 
 from telegram import Update
 from telegram.constants import ChatAction
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from teacher_agent import process_agent_query
@@ -254,7 +255,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             # Send message(s) to user with HTML formatting
             for i, chunk in enumerate(chunks):
-                await update.message.reply_text(chunk, parse_mode='HTML')
+                try:
+                    await update.message.reply_text(chunk, parse_mode='HTML')
+                except BadRequest as e:
+                    if "Can't parse entities" in str(e):
+                        # Fallback: send without HTML formatting
+                        await update.message.reply_text(chunk, parse_mode=None)
+                    else:
+                        raise
 
                 # Small delay between chunks for better UX
                 if i < len(chunks) - 1:
@@ -391,7 +399,14 @@ async def handle_photo_message(
 
             # Send message(s) to user with HTML formatting
             for i, chunk in enumerate(chunks):
-                await update.message.reply_text(chunk, parse_mode='HTML')
+                try:
+                    await update.message.reply_text(chunk, parse_mode='HTML')
+                except BadRequest as e:
+                    if "Can't parse entities" in str(e):
+                        # Fallback: send without HTML formatting
+                        await update.message.reply_text(chunk, parse_mode=None)
+                    else:
+                        raise
 
                 # Small delay between chunks for better UX
                 if i < len(chunks) - 1:
@@ -593,7 +608,14 @@ async def handle_voice_message(
 
             # Send message(s) to user with HTML formatting
             for i, chunk in enumerate(chunks):
-                await update.message.reply_text(chunk, parse_mode="HTML")
+                try:
+                    await update.message.reply_text(chunk, parse_mode="HTML")
+                except BadRequest as e:
+                    if "Can't parse entities" in str(e):
+                        # Fallback: send without HTML formatting
+                        await update.message.reply_text(chunk, parse_mode=None)
+                    else:
+                        raise
 
                 # Small delay between chunks for better UX
                 if i < len(chunks) - 1:
