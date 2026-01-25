@@ -18,18 +18,24 @@ This module provides a programmatic interface to the ADK agent, following the
 ADK Runtime's Event Loop pattern for proper state management and event processing.
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from .agent import root_agent
+
+# Module-level session service - persists across the app lifecycle
+# This ensures conversation history is maintained between messages
+_session_service = InMemorySessionService()
 
 
 async def process_agent_query(
     query: str,
     user_id: str = "default_user",
     session_id: Optional[str] = None,
-    app_name: str = "educational_assistant"
+    app_name: str = "educational_assistant",
+    image_data: Optional[bytes] = None,
+    image_mime_type: str = "image/jpeg"
 ) -> Dict[str, Any]:
     """Process a user query through the Educational Assistant Agent.
 
@@ -70,26 +76,24 @@ async def process_agent_query(
         >>> asyncio.run(main())
     """
     try:
-        # Initialize session service
-        session_service = InMemorySessionService()
-        
+        # Use the module-level session service for persistence across calls
         # Create or retrieve session
         if session_id:
             # Try to get existing session
-            session = await session_service.get_session(
+            session = await _session_service.get_session(
                 app_name=app_name,
                 user_id=user_id,
                 session_id=session_id
             )
             if not session:
                 # Session not found, create new one
-                session = await session_service.create_session(
+                session = await _session_service.create_session(
                     app_name=app_name,
                     user_id=user_id
                 )
         else:
             # Create new session
-            session = await session_service.create_session(
+            session = await _session_service.create_session(
                 app_name=app_name,
                 user_id=user_id
             )
@@ -98,14 +102,26 @@ async def process_agent_query(
         runner = Runner(
             agent=root_agent,
             app_name=app_name,
-            session_service=session_service
+            session_service=_session_service
         )
         
+        # Build parts list for multimodal content
+        parts: List[types.Part] = []
+
+        # Add image part if provided (image first for better context)
+        if image_data is not None:
+            blob = types.Blob(data=image_data, mime_type=image_mime_type)
+            parts.append(types.Part(inline_data=blob))
+
+        # Add text part
+        if query:
+            parts.append(types.Part(text=query))
+        elif image_data is not None:
+            # Default prompt for image-only messages (in Arabic)
+            parts.append(types.Part(text="اشرح لي هذه الصورة أو المحتوى التعليمي المعروض فيها."))
+
         # Create user message content
-        content = types.Content(
-            role='user',
-            parts=[types.Part(text=query)]
-        )
+        content = types.Content(role='user', parts=parts)
         
         # Collect response parts
         response_parts = []

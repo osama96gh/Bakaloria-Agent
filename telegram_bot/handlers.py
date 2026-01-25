@@ -25,6 +25,41 @@ logger = logging.getLogger(__name__)
 session_manager = SessionManager()
 
 
+async def download_photo(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+) -> tuple[Optional[bytes], str]:
+    """
+    Download the largest available photo from a Telegram message.
+
+    Args:
+        update: The Telegram update containing the photo
+        context: The callback context
+
+    Returns:
+        Tuple of (photo_bytes, mime_type) or (None, "") on failure
+    """
+    if not update.message or not update.message.photo:
+        return None, ""
+
+    try:
+        # Get the largest photo (last in the list has highest resolution)
+        photo = update.message.photo[-1]
+
+        # Download the photo file
+        file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await file.download_as_bytearray()
+
+        # Telegram photos are typically JPEG
+        mime_type = "image/jpeg"
+
+        return bytes(photo_bytes), mime_type
+
+    except Exception as e:
+        logger.error(f"Failed to download photo: {e}")
+        return None, ""
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle /start command - welcome message in Arabic.
@@ -253,6 +288,138 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_id=user_id,
             username=username,
             query=message_text,
+            status="error",
+            duration=duration,
+        )
+
+        # Send user-friendly error message
+        error_message = format_error_message(e)
+        await update.message.reply_text(error_message)
+
+
+async def handle_photo_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Handle photo messages - process images with optional caption.
+
+    Supports:
+    - Photo with caption: Uses caption as the query
+    - Photo without caption: Uses default educational prompt
+
+    Args:
+        update: The Telegram update object
+        context: The callback context
+    """
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+
+    # Get caption (text accompanying the photo)
+    caption = update.message.caption
+    if caption:
+        caption = caption.strip()
+
+    query_text = caption or ""
+
+    logger.info(
+        f"Received photo from user {user_id} (@{username})"
+        + (f' with caption: "{query_text[:50]}..."' if query_text else " (no caption)")
+    )
+
+    # Show typing indicator
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action=ChatAction.TYPING
+    )
+
+    start_time = time.time()
+
+    try:
+        # Download the photo
+        photo_bytes, mime_type = await download_photo(update, context)
+
+        if photo_bytes is None:
+            await update.message.reply_text(
+                "عذراً، لم أتمكن من تحميل الصورة. يرجى المحاولة مرة أخرى."
+            )
+            return
+
+        # Get or create session ID
+        session_id = session_manager.get_or_create_session(user_id)
+
+        # Process query with the agent (including image)
+        result = await process_agent_query(
+            query=query_text,
+            user_id=str(user_id),
+            session_id=session_id,
+            app_name=APP_NAME,
+            image_data=photo_bytes,
+            image_mime_type=mime_type,
+        )
+
+        # Store updated session ID
+        session_manager.store_session(user_id, result["session_id"])
+
+        duration = time.time() - start_time
+
+        # Handle response based on status
+        if result["status"] == "success":
+            response_text = result["response"]
+
+            # Log interaction
+            log_user_interaction(
+                user_id=user_id,
+                username=username,
+                query=f"[IMAGE] {query_text}" if query_text else "[IMAGE]",
+                status="success",
+                duration=duration,
+            )
+
+            # Split message if too long
+            chunks = split_message(response_text)
+
+            # Send message(s) to user
+            for i, chunk in enumerate(chunks):
+                await update.message.reply_text(chunk)
+
+                # Small delay between chunks for better UX
+                if i < len(chunks) - 1:
+                    await asyncio.sleep(0.5)
+
+        else:
+            # Agent returned error status
+            error_msg = result.get("error", "Unknown error")
+            logger.error(f"Agent error for user {user_id}: {error_msg}")
+
+            # Log interaction
+            log_user_interaction(
+                user_id=user_id,
+                username=username,
+                query=f"[IMAGE] {query_text}" if query_text else "[IMAGE]",
+                status="error",
+                duration=duration,
+            )
+
+            # Send user-friendly error message
+            await update.message.reply_text(
+                "عذراً، واجهت مشكلة في معالجة الصورة. "
+                "يرجى المحاولة مرة أخرى أو إرسال صورة أوضح."
+            )
+
+    except Exception as e:
+        duration = time.time() - start_time
+
+        logger.exception(f"Error processing photo from user {user_id}: {e}")
+
+        # Log interaction
+        log_user_interaction(
+            user_id=user_id,
+            username=username,
+            query=f"[IMAGE] {query_text}" if query_text else "[IMAGE]",
             status="error",
             duration=duration,
         )

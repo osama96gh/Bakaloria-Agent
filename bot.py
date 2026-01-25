@@ -18,6 +18,7 @@ from telegram.ext import (
 from telegram_bot import (
     error_handler,
     handle_message,
+    handle_photo_message,
     help_command,
     new_command,
     session_manager,
@@ -50,6 +51,11 @@ def main() -> None:
     # Register message handler for text messages (not commands)
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
+
+    # Register handler for photo messages (with or without caption)
+    application.add_handler(
+        MessageHandler(filters.PHOTO, handle_photo_message)
     )
 
     # Register error handler
