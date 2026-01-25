@@ -436,6 +436,204 @@ async def handle_photo_message(
         await update.message.reply_text(error_message)
 
 
+async def download_voice(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> tuple[Optional[bytes], str, int]:
+    """
+    Download voice message from a Telegram message.
+
+    Args:
+        update: The Telegram update containing the voice
+        context: The callback context
+
+    Returns:
+        Tuple of (audio_bytes, mime_type, duration_seconds) or (None, "", 0) on failure
+    """
+    if not update.message or not update.message.voice:
+        return None, "", 0
+
+    try:
+        voice = update.message.voice
+
+        # Download the voice file
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytes = await file.download_as_bytearray()
+
+        # Telegram voice messages are OGG with Opus codec
+        mime_type = voice.mime_type or "audio/ogg"
+        duration = voice.duration
+
+        return bytes(audio_bytes), mime_type, duration
+
+    except Exception as e:
+        logger.error(f"Failed to download voice message: {e}")
+        return None, "", 0
+
+
+async def handle_voice_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """
+    Handle voice messages - transcribe and process with the educational agent.
+
+    Flow:
+    1. Download voice file from Telegram
+    2. Transcribe using Google Chirp 3
+    3. Pass transcribed text to agent
+    4. Return response to user
+
+    Args:
+        update: The Telegram update object
+        context: The callback context
+    """
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+
+    logger.info(f"Received voice message from user {user_id} (@{username})")
+
+    # Show typing indicator
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action=ChatAction.TYPING,
+    )
+
+    start_time = time.time()
+
+    try:
+        # Download the voice file
+        audio_bytes, mime_type, duration = await download_voice(update, context)
+
+        if audio_bytes is None:
+            await update.message.reply_text(
+                "عذراً، لم أتمكن من تحميل الرسالة الصوتية. يرجى المحاولة مرة أخرى."
+            )
+            return
+
+        # Check duration limit (max 2 minutes)
+        max_duration_seconds = 120
+        if duration > max_duration_seconds:
+            await update.message.reply_text(
+                "عذراً، الرسالة الصوتية طويلة جداً. "
+                "الحد الأقصى هو ٢ دقيقة."
+            )
+            return
+
+        # Transcribe audio
+        from .transcription import transcribe_audio
+
+        transcription_result = await transcribe_audio(
+            audio_data=audio_bytes,
+            mime_type=mime_type,
+            language_code="ar-XA",  # Standard Arabic
+        )
+
+        if not transcription_result.success:
+            error_msg = "لم أتمكن من فهم الرسالة الصوتية."
+            if "No speech detected" in (transcription_result.error or ""):
+                error_msg = (
+                    "لم أتمكن من سماع أي كلام في الرسالة الصوتية. "
+                    "يرجى المحاولة مرة أخرى."
+                )
+
+            await update.message.reply_text(error_msg)
+
+            log_user_interaction(
+                user_id=user_id,
+                username=username,
+                query="[VOICE] (transcription failed)",
+                status="error",
+                duration=time.time() - start_time,
+            )
+            return
+
+        transcribed_text = transcription_result.text
+
+        logger.info(
+            f"Transcribed voice from user {user_id}: "
+            f'"{transcribed_text[:50]}..." (confidence: {transcription_result.confidence:.2f})'
+        )
+
+        # Get or create session ID
+        session_id = session_manager.get_or_create_session(user_id)
+
+        # Process query with the agent
+        result = await process_agent_query(
+            query=transcribed_text,
+            user_id=str(user_id),
+            session_id=session_id,
+            app_name=APP_NAME,
+        )
+
+        # Store updated session ID
+        session_manager.store_session(user_id, result["session_id"])
+
+        duration_total = time.time() - start_time
+
+        # Handle response based on status
+        if result["status"] == "success":
+            response_text = result["response"]
+
+            # Log interaction
+            log_user_interaction(
+                user_id=user_id,
+                username=username,
+                query=f"[VOICE] {transcribed_text}",
+                status="success",
+                duration=duration_total,
+            )
+
+            # Sanitize HTML for Telegram and split message if too long
+            sanitized_response = sanitize_html_for_telegram(response_text)
+            chunks = split_message(sanitized_response)
+
+            # Send message(s) to user with HTML formatting
+            for i, chunk in enumerate(chunks):
+                await update.message.reply_text(chunk, parse_mode="HTML")
+
+                # Small delay between chunks for better UX
+                if i < len(chunks) - 1:
+                    await asyncio.sleep(0.5)
+
+        else:
+            # Agent returned error status
+            error_msg = result.get("error", "Unknown error")
+            logger.error(f"Agent error for user {user_id}: {error_msg}")
+
+            log_user_interaction(
+                user_id=user_id,
+                username=username,
+                query=f"[VOICE] {transcribed_text}",
+                status="error",
+                duration=duration_total,
+            )
+
+            await update.message.reply_text(
+                "عذراً، واجهت مشكلة في معالجة سؤالك. "
+                "يرجى إعادة صياغة السؤال أو المحاولة مرة أخرى."
+            )
+
+    except Exception as e:
+        duration_total = time.time() - start_time
+
+        logger.exception(f"Error processing voice message from user {user_id}: {e}")
+
+        log_user_interaction(
+            user_id=user_id,
+            username=username,
+            query="[VOICE] (processing error)",
+            status="error",
+            duration=duration_total,
+        )
+
+        error_message = format_error_message(e)
+        await update.message.reply_text(error_message)
+
+
 async def error_handler(
     update: Optional[Update],
     context: ContextTypes.DEFAULT_TYPE

@@ -19,6 +19,7 @@ from telegram_bot import (
     error_handler,
     handle_message,
     handle_photo_message,
+    handle_voice_message,
     help_command,
     new_command,
     session_manager,
@@ -56,6 +57,11 @@ def main() -> None:
     # Register handler for photo messages (with or without caption)
     application.add_handler(
         MessageHandler(filters.PHOTO, handle_photo_message)
+    )
+
+    # Register handler for voice messages
+    application.add_handler(
+        MessageHandler(filters.VOICE, handle_voice_message)
     )
 
     # Register error handler

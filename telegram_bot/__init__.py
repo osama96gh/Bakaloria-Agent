@@ -9,6 +9,7 @@ from .handlers import (
     error_handler,
     handle_message,
     handle_photo_message,
+    handle_voice_message,
     help_command,
     new_command,
     session_manager,
@@ -21,6 +22,7 @@ __all__ = [
     "new_command",
     "handle_message",
     "handle_photo_message",
+    "handle_voice_message",
     "error_handler",
     "session_manager",
 ]
