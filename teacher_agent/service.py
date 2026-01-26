@@ -18,15 +18,41 @@ This module provides a programmatic interface to the ADK agent, following the
 ADK Runtime's Event Loop pattern for proper state management and event processing.
 """
 
+import logging
+import os
 from typing import Optional, Dict, Any, List
+
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+
 from .agent import root_agent
 
+logger = logging.getLogger(__name__)
+
 # Module-level session service - persists across the app lifecycle
-# This ensures conversation history is maintained between messages
-_session_service = InMemorySessionService()
+# Use SupabaseSessionService (REST API) if configured, else fallback to InMemory
+_supabase_url = os.getenv("SUPABASE_URL")
+_supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+if _supabase_url and _supabase_key:
+    try:
+        from .supabase_session_service import SupabaseSessionService
+        _session_service = SupabaseSessionService(
+            supabase_url=_supabase_url,
+            supabase_key=_supabase_key,
+        )
+        logger.info("Using SupabaseSessionService with REST API")
+    except Exception as e:
+        logger.error(f"Failed to initialize SupabaseSessionService: {e}")
+        logger.warning("Falling back to InMemorySessionService")
+        _session_service = InMemorySessionService()
+else:
+    logger.warning(
+        "SUPABASE_URL or SUPABASE_SERVICE_KEY not configured - using InMemorySessionService "
+        "(sessions will not persist across restarts)"
+    )
+    _session_service = InMemorySessionService()
 
 
 async def process_agent_query(
