@@ -11,10 +11,10 @@ from typing import Optional
 
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TimedOut
 from telegram.ext import ContextTypes
 
-from teacher_agent import process_agent_query
+from core import process_agent_query, reset_user_persona
 
 from .config import APP_NAME
 from .session_manager import SessionManager
@@ -29,6 +29,61 @@ logger = logging.getLogger(__name__)
 
 # Module-level session manager instance
 session_manager = SessionManager()
+
+# Constants for retry logic
+MAX_SEND_RETRIES = 3
+RETRY_DELAY_SECONDS = 1.0
+
+
+async def send_reply_with_retry(
+    message,
+    text: str,
+    parse_mode: Optional[str] = "HTML",
+    max_retries: int = MAX_SEND_RETRIES,
+) -> bool:
+    """
+    Send a reply message with retry logic for timeouts.
+
+    Args:
+        message: The Telegram message to reply to
+        text: The text to send
+        parse_mode: HTML or None
+        max_retries: Maximum number of retry attempts
+
+    Returns:
+        True if message was sent successfully, False otherwise
+    """
+    for attempt in range(max_retries):
+        try:
+            await message.reply_text(text, parse_mode=parse_mode)
+            return True
+        except BadRequest as e:
+            if "Can't parse entities" in str(e) and parse_mode == "HTML":
+                # Fallback: send without HTML formatting
+                try:
+                    await message.reply_text(text, parse_mode=None)
+                    return True
+                except TimedOut:
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            f"Timeout sending reply (attempt {attempt + 1}), retrying..."
+                        )
+                        await asyncio.sleep(RETRY_DELAY_SECONDS)
+                        continue
+                    logger.error("Failed to send reply after max retries")
+                    return False
+            else:
+                raise
+        except TimedOut:
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"Timeout sending reply (attempt {attempt + 1}), retrying..."
+                )
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+            else:
+                logger.error("Failed to send reply after max retries")
+                return False
+    return False
 
 
 async def download_photo(
@@ -86,25 +141,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     logger.info(f"User {user_id} (@{username}) started the bot")
 
-    welcome_message = """مرحباً! أنا مساعدك التعليمي الذكي 📚
+    welcome_message = """مرحباً! أنا مساعدك الذكي القابل للتخصيص ✨
 
-يمكنني مساعدتك في فهم المحتوى الأكاديمي للمرحلة الثانوية.
-
-المواد التي يمكنني مساعدتك فيها:
-• الرياضيات (جبر، هندسة، حساب تفاضل)
-• العلوم (فيزياء، كيمياء، أحياء)
-• وغيرها من المواد الدراسية
-
-أمثلة على الأسئلة:
-- "اشرح نظرية فيثاغورس"
-- "ما هو قانون نيوتن الثاني؟"
-- "ساعدني في فهم عملية التمثيل الضوئي"
+يمكنني التكيف مع احتياجاتك وتفضيلاتك - فقط أخبرني كيف تريدني أن أكون!
 
 الأوامر المتاحة:
 /help - عرض المساعدة
 /new - بدء محادثة جديدة
+/reset_persona - إعادة تعيين شخصيتي والبدء من جديد
 
-فقط أرسل سؤالك وسأساعدك! 🎓"""
+أرسل أي رسالة وسأتعرف عليك! 🎓"""
 
     await update.message.reply_text(welcome_message)
 
@@ -124,26 +170,28 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not update.message:
         return
 
-    help_message = """📖 كيفية استخدام المساعد التعليمي
+    help_message = """📖 كيفية استخدام المساعد الذكي
 
-يمكنك طرح أي سؤال تعليمي مباشرة، وسأقوم بشرحه لك بطريقة مبسطة.
+أنا مساعد قابل للتخصيص - يمكنك تحديد شخصيتي ودوري وأسلوبي!
 
 الأوامر المتاحة:
 /start - رسالة الترحيب
 /help - عرض هذه المساعدة
 /new - بدء محادثة جديدة (نسيان المحادثة السابقة)
+/reset_persona - إعادة تعيين شخصيتي والبدء من جديد
+
+كيفية تخصيصي:
+• أخبرني باسمك المفضل لي
+• حدد دوري (مدرس، صديق، مستشار، إلخ)
+• اختر أسلوب التواصل (رسمي، ودود، مرح)
+• حدد المجالات التي تريد مساعدة فيها
 
 نصائح:
-• يمكنني تذكر المحادثة السابقة، لذا يمكنك طرح أسئلة متابعة
-• إذا أردت البدء بموضوع جديد، استخدم /new
-• أشرح المفاهيم بطريقة مبسطة مع أمثلة عملية
+• يمكنني تذكر المحادثة والتفضيلات السابقة
+• إذا أردت تغيير شخصيتي، فقط أخبرني
+• استخدم /reset_persona للبدء من الصفر
 
-أمثلة على الأسئلة:
-- "ما هي الدالة التربيعية؟"
-- "كيف تعمل الخلية؟"
-- "اشرح قانون أوم"
-
-فقط أرسل سؤالك وسأساعدك! 💡"""
+فقط أرسل رسالتك وسأساعدك! 💡"""
 
     await update.message.reply_text(help_message)
 
@@ -176,6 +224,51 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 يمكنك الآن طرح سؤال جديد، وسأنسى المحادثة السابقة.
 
 فقط أرسل سؤالك! 📚"""
+
+    await update.message.reply_text(confirmation_message)
+
+
+async def reset_persona_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle /reset_persona command - reset agent persona to defaults.
+
+    This clears all saved personality, mission, and preferences,
+    allowing the user to reconfigure the agent from scratch.
+
+    Args:
+        update: The Telegram update object
+        context: The callback context
+
+    Example:
+        User sends: /reset_persona
+        Bot responds: Confirmation that persona was reset
+    """
+    if not update.effective_user or not update.message:
+        return
+
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+
+    # Reset persona
+    success = await reset_user_persona(str(user_id))
+
+    # Also reset the session to start fresh
+    session_manager.reset_session(user_id)
+
+    if success:
+        logger.info(f"User {user_id} (@{username}) reset their agent persona")
+
+        confirmation_message = """تم إعادة تعيين شخصية المساعد! 🔄
+
+تم مسح جميع التفضيلات والإعدادات السابقة.
+في المحادثة القادمة، سأتعرف عليك من جديد وأتكيف مع تفضيلاتك.
+
+أرسل أي رسالة للبدء! ✨"""
+    else:
+        logger.error(f"Failed to reset persona for user {user_id} (@{username})")
+
+        confirmation_message = """عذراً، حدث خطأ أثناء إعادة التعيين.
+يرجى المحاولة مرة أخرى لاحقاً."""
 
     await update.message.reply_text(confirmation_message)
 
@@ -255,14 +348,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             # Send message(s) to user with HTML formatting
             for i, chunk in enumerate(chunks):
-                try:
-                    await update.message.reply_text(chunk, parse_mode='HTML')
-                except BadRequest as e:
-                    if "Can't parse entities" in str(e):
-                        # Fallback: send without HTML formatting
-                        await update.message.reply_text(chunk, parse_mode=None)
-                    else:
-                        raise
+                await send_reply_with_retry(update.message, chunk)
 
                 # Small delay between chunks for better UX
                 if i < len(chunks) - 1:
@@ -399,14 +485,7 @@ async def handle_photo_message(
 
             # Send message(s) to user with HTML formatting
             for i, chunk in enumerate(chunks):
-                try:
-                    await update.message.reply_text(chunk, parse_mode='HTML')
-                except BadRequest as e:
-                    if "Can't parse entities" in str(e):
-                        # Fallback: send without HTML formatting
-                        await update.message.reply_text(chunk, parse_mode=None)
-                    else:
-                        raise
+                await send_reply_with_retry(update.message, chunk)
 
                 # Small delay between chunks for better UX
                 if i < len(chunks) - 1:
@@ -608,14 +687,7 @@ async def handle_voice_message(
 
             # Send message(s) to user with HTML formatting
             for i, chunk in enumerate(chunks):
-                try:
-                    await update.message.reply_text(chunk, parse_mode="HTML")
-                except BadRequest as e:
-                    if "Can't parse entities" in str(e):
-                        # Fallback: send without HTML formatting
-                        await update.message.reply_text(chunk, parse_mode=None)
-                    else:
-                        raise
+                await send_reply_with_retry(update.message, chunk)
 
                 # Small delay between chunks for better UX
                 if i < len(chunks) - 1:
@@ -634,9 +706,11 @@ async def handle_voice_message(
                 duration=duration_total,
             )
 
-            await update.message.reply_text(
+            await send_reply_with_retry(
+                update.message,
                 "عذراً، واجهت مشكلة في معالجة سؤالك. "
-                "يرجى إعادة صياغة السؤال أو المحاولة مرة أخرى."
+                "يرجى إعادة صياغة السؤال أو المحاولة مرة أخرى.",
+                parse_mode=None,
             )
 
     except Exception as e:

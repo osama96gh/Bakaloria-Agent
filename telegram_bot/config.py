@@ -41,6 +41,10 @@ if not TELEGRAM_BOT_TOKEN:
     )
 if not ANTHROPIC_API_KEY:
     missing_vars.append("ANTHROPIC_API_KEY: Get from Anthropic Console")
+if not SUPABASE_URL:
+    missing_vars.append("SUPABASE_URL: Get from Supabase project settings")
+if not SUPABASE_SERVICE_KEY:
+    missing_vars.append("SUPABASE_SERVICE_KEY: Get from Supabase project settings (service_role key)")
 
 if missing_vars:
     error_msg = "Missing required environment variables:\n" + "\n".join(
@@ -49,13 +53,6 @@ if missing_vars:
     logging.error(error_msg)
     print(error_msg, file=sys.stderr)
     sys.exit(1)
-
-# Warn about optional Supabase config (sessions will be in-memory if not configured)
-if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-    logging.warning(
-        "SUPABASE_URL/SUPABASE_SERVICE_KEY not set - "
-        "sessions will be in-memory only (will not persist across restarts)"
-    )
 
 # Constants
 APP_NAME = "educational_assistant"

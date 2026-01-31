@@ -8,7 +8,7 @@ RUN pip install uv
 COPY pyproject.toml uv.lock ./
 RUN uv pip install --system .
 
-COPY teacher_agent/ ./teacher_agent/
+COPY core/ ./core/
 COPY telegram_bot/ ./telegram_bot/
 COPY bot.py ./
 

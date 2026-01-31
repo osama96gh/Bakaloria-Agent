@@ -12,6 +12,7 @@ from .handlers import (
     handle_voice_message,
     help_command,
     new_command,
+    reset_persona_command,
     session_manager,
     start_command,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "start_command",
     "help_command",
     "new_command",
+    "reset_persona_command",
     "handle_message",
     "handle_photo_message",
     "handle_voice_message",

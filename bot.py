@@ -5,6 +5,20 @@ Main entry point for the Telegram bot application that provides educational
 assistance to high school students in Arabic.
 """
 
+# Load environment variables FIRST, before any other imports
+from pathlib import Path
+from dotenv import load_dotenv
+
+env_paths = [
+    Path(__file__).parent / ".env",
+    Path("/app/.env"),
+    Path(".env"),
+]
+for env_path in env_paths:
+    if env_path.exists():
+        load_dotenv(env_path)
+        break
+
 import asyncio
 import logging
 
@@ -22,6 +36,7 @@ from telegram_bot import (
     handle_voice_message,
     help_command,
     new_command,
+    reset_persona_command,
     session_manager,
     start_command,
 )
@@ -48,6 +63,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("new", new_command))
+    application.add_handler(CommandHandler("reset_persona", reset_persona_command))
 
     # Register message handler for text messages (not commands)
     application.add_handler(
