@@ -15,6 +15,7 @@ from telegram.error import BadRequest, TimedOut
 from telegram.ext import ContextTypes
 
 from core import process_agent_query, reset_user_persona
+from core.outreach_service import outreach_service
 
 from .config import APP_NAME
 from .session_manager import SessionManager
@@ -304,6 +305,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f'"{message_text[:50]}..."'
     )
 
+    # Track engagement for proactive outreach
+    if outreach_service:
+        outreach_service.update_interaction(
+            "telegram", str(user_id), update.effective_chat.id
+        )
+
     # Show typing indicator
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id,
@@ -429,6 +436,12 @@ async def handle_photo_message(
         f"Received photo from user {user_id} (@{username})"
         + (f' with caption: "{query_text[:50]}..."' if query_text else " (no caption)")
     )
+
+    # Track engagement for proactive outreach
+    if outreach_service:
+        outreach_service.update_interaction(
+            "telegram", str(user_id), update.effective_chat.id
+        )
 
     # Show typing indicator
     await context.bot.send_chat_action(
@@ -589,6 +602,12 @@ async def handle_voice_message(
     username = update.effective_user.username
 
     logger.info(f"Received voice message from user {user_id} (@{username})")
+
+    # Track engagement for proactive outreach
+    if outreach_service:
+        outreach_service.update_interaction(
+            "telegram", str(user_id), update.effective_chat.id
+        )
 
     # Show typing indicator
     await context.bot.send_chat_action(

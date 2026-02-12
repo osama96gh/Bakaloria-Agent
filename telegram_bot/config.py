@@ -58,6 +58,11 @@ if missing_vars:
 APP_NAME = "educational_assistant"
 MAX_MESSAGE_LENGTH = 4096  # Telegram message length limit
 
+# Proactive outreach settings
+OUTREACH_CHECK_INTERVAL_SECONDS = int(os.getenv("OUTREACH_CHECK_INTERVAL_SECONDS", "3133"))
+OUTREACH_INACTIVITY_HOURS = int(os.getenv("OUTREACH_INACTIVITY_HOURS", "5"))
+OUTREACH_COOLDOWN_HOURS = int(os.getenv("OUTREACH_COOLDOWN_HOURS", "21"))
+
 # Logging configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
