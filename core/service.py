@@ -20,12 +20,16 @@ persona configuration, following the ADK Runtime's Event Loop pattern.
 
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from google.adk.agents.llm_agent import Agent
+from google.adk.code_executors import BuiltInCodeExecutor
 from google.adk.models import Gemini
 from google.adk.runners import Runner
+from google.adk.tools import AgentTool
+from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.genai import types
 
 from .persona_service import PersonaService
@@ -66,6 +70,37 @@ _memory_service = MemoryService(
     supabase_key=_supabase_key,
 )
 
+# Sub-agents for built-in tools (isolated to avoid function calling conflicts)
+_search_agent = Agent(
+    model=Gemini(model='gemini-3-pro-preview'),
+    name="google_search",
+    description=(
+        "Search the web for current information, news, facts, or any up-to-date data. "
+        "Use when the user asks about recent events, needs fact-checking, "
+        "or wants information you're not sure about."
+    ),
+    instruction=(
+        "You are a search assistant. Use Google Search to find the requested information. "
+        "Return the results clearly and concisely in Arabic. Include source context when relevant."
+    ),
+    tools=[GoogleSearchTool()],
+)
+
+_code_agent = Agent(
+    model=Gemini(model='gemini-3-pro-preview'),
+    name="code_executor",
+    description=(
+        "Execute Python code for math calculations, data analysis, programming tasks, "
+        "or any computation that needs verification. "
+        "Use when accuracy matters or when showing step-by-step calculations."
+    ),
+    instruction=(
+        "You are a code execution assistant. Write and execute Python code to solve the given task. "
+        "Show the code and explain the output. Respond in Arabic."
+    ),
+    code_executor=BuiltInCodeExecutor(),
+)
+
 # Create agent once at module level (uses ADK state injection for persona)
 _prompt_file = Path(__file__).parent / "instruction.md"
 _agent = Agent(
@@ -73,7 +108,12 @@ _agent = Agent(
     name="bulbul",
     instruction=_prompt_file.read_text(encoding="utf-8"),
     description="assistant",
-    tools=[update_persona, manage_memory],
+    tools=[
+        update_persona,
+        manage_memory,
+        AgentTool(agent=_search_agent),
+        AgentTool(agent=_code_agent),
+    ],
 )
 
 
@@ -120,6 +160,7 @@ async def process_agent_query(
 
         # Build initial state with persona data
         initial_state = dict(persona)
+        initial_state["current_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
         # Format and add memories to state
         if memories:

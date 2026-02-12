@@ -47,21 +47,32 @@ async def manage_memory(action: str, fact: str = "", fact_id: str = "") -> Dict[
     Manage memories about the user to remember across conversations.
 
     Use this tool to store, update, or remove facts you learn about the user.
-    Memories persist across sessions and help you personalize interactions.
+    Memories persist across all sessions and help you personalize interactions.
+    These are facts ABOUT THE USER, not about you (use update_persona for that).
 
     Actions:
     - "add": Save a new fact about the user (fact_id is auto-generated)
-    - "update": Modify an existing fact (requires fact_id)
+    - "update": Modify an existing fact (requires fact_id and new fact text)
     - "remove": Delete a fact (requires fact_id)
 
-    Examples:
-    - Add: action="add", fact="يعمل مهندس برمجيات"
-    - Update: action="update", fact_id="fact-01", fact="يعمل مدير مشاريع الآن"
-    - Remove: action="remove", fact_id="fact-02"
+    What to store (by category):
+    - Personal: name, age, location. Example: "اسمه أحمد، من دمشق"
+    - Interests: hobbies, topics they ask about. Example: "مهتم بالبرمجة"
+    - Preferences: communication style, detail level. Example: "يفضل الإجابات المختصرة"
+    - Context: current goals, projects, deadlines. Example: "يشتغل على مشروع تخرج"
+
+    Fact format guidelines:
+    - Write concise, atomic facts (one idea per fact)
+    - Good: "مبرمج Python" — one clear fact
+    - Good: "يحب القهوة التركية" — one clear fact
+    - Bad: "مبرمج Python يحب القهوة وعنده مشروع" — too many ideas in one fact
+
+    When to store: important, lasting information that will help future interactions.
+    When NOT to store: transient details, things obvious from context, trivial info.
 
     Args:
         action: The operation to perform: "add", "update", or "remove"
-        fact: The fact text (required for add/update)
+        fact: The fact text (required for add/update). Write in Arabic, keep concise.
         fact_id: The fact identifier (required for update/remove, format: fact-XX)
 
     Returns:

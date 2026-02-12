@@ -47,27 +47,32 @@ async def update_persona(updates: str) -> Dict[str, Any]:
     """
     Save persona attributes to remember for future conversations.
 
-    Use this tool to save any preferences the user shares about how you should
-    behave, your name, role, personality, expertise areas, language preferences, etc.
+    Use this tool to save preferences the user shares about how you should
+    behave — your name, role, personality, expertise areas, language, etc.
+    These values define YOUR identity and persist across all conversations.
 
-    Examples:
-    - {"name": "سارة"} - save your name
-    - {"role": "مدرسة رياضيات"} - save your role
-    - {"personality": "ودود ومرح"} - save personality description
-    - {"dialect": "syrian", "mission": "مساعدة الطلاب"} - save multiple values
-
-    You can use any keys that make sense. Common keys:
-    - name: Your name (what the user calls you)
-    - role: Your role/job description
-    - personality: Your personality traits
-    - mission: Your purpose/mission statement
-    - dialect: Language dialect (syrian, egyptian, gulf, standard)
-    - instructions: Custom instructions from the user
+    Common keys (you can use any key that makes sense):
+    - name: Your name (what the user calls you). Example: "بلبل"
+    - role: Your role/job description. Example: "مساعد برمجة" or "صديق للدردشة"
+    - personality: Your personality traits. Example: "مرح ومباشر مع لمسة فكاهة"
+    - mission: Your purpose/mission statement. Example: "مساعدة المستخدم في مهامه اليومية"
+    - dialect: Language dialect. Values: "syrian", "egyptian", "gulf", "standard"
     - description: A description of who you are
+    - instructions: Custom behavior instructions from the user
+
+    When to use:
+    - User tells you their preferred name for you, your role, or how to behave
+    - User changes a previous preference (e.g., "switch to Egyptian dialect")
+    - First interaction: save initial preferences as they emerge naturally
+
+    When NOT to use:
+    - Do not save after every message — only when there is a real change
+    - Do not save temporary or transient preferences
+    - Do not save information ABOUT the user (use manage_memory for that)
 
     Args:
         updates: JSON string containing key-value pairs to save.
-                 Example: '{"name": "سارة", "role": "معلمة"}'
+                 Example: '{"name": "سارة", "role": "معلمة", "dialect": "syrian"}'
 
     Returns:
         Status object with saved keys or error message
