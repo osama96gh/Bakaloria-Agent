@@ -72,8 +72,9 @@ _memory_service = MemoryService(
 
 # Sub-agents for built-in tools (isolated to avoid function calling conflicts)
 _search_agent = Agent(
-    model=Gemini(model='gemini-3-pro-preview'),
+    model=Gemini(model='gemini-pro-latest'),
     name="google_search",
+
     description=(
         "Search the web for current information, news, facts, or any up-to-date data. "
         "Use when the user asks about recent events, needs fact-checking, "
@@ -87,8 +88,9 @@ _search_agent = Agent(
 )
 
 _code_agent = Agent(
-    model=Gemini(model='gemini-3-pro-preview'),
+    model=Gemini(model='gemini-pro-latest'),
     name="code_executor",
+
     description=(
         "Execute Python code for math calculations, data analysis, programming tasks, "
         "or any computation that needs verification. "
@@ -104,8 +106,9 @@ _code_agent = Agent(
 # Create agent once at module level (uses ADK state injection for persona)
 _prompt_file = Path(__file__).parent / "instruction.md"
 _agent = Agent(
-    model=Gemini(model='gemini-3-pro-preview'),
+    model=Gemini(model='gemini-pro-latest'),
     name="bulbul",
+
     instruction=_prompt_file.read_text(encoding="utf-8"),
     description="assistant",
     tools=[
