@@ -1,8 +1,5 @@
 """
-Configuration and environment validation for the Telegram bot.
-
-This module handles environment variable loading, validation, and provides
-constants used throughout the bot application.
+Configuration and environment validation for the Telegram bot service.
 """
 
 import logging
@@ -12,9 +9,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-# Try parent directory first, then /app (Docker), then default
 env_paths = [
+    Path(__file__).parent.parent.parent / ".env",
     Path(__file__).parent.parent / ".env",
     Path("/app/.env"),
     Path(".env"),
@@ -27,24 +23,18 @@ for env_path in env_paths:
 
 # Environment variables validation
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# Supabase configuration (for persistent sessions via REST API)
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+# Goa Configuration
+GOA_URL = os.getenv("GOA_URL", "http://195.35.0.64").rstrip("/")
+GOA_API_KEY = os.getenv("GOA_API_KEY")
+BULBUL_PARTICIPANT_ID = os.getenv("BULBUL_PARTICIPANT_ID", "923dc787-d276-43be-a52d-bea462561bad") # The agent's ID
 
 # Validate required environment variables
 missing_vars = []
 if not TELEGRAM_BOT_TOKEN:
-    missing_vars.append(
-        "TELEGRAM_BOT_TOKEN: Get from @BotFather on Telegram (/mybots command)"
-    )
-if not ANTHROPIC_API_KEY:
-    missing_vars.append("ANTHROPIC_API_KEY: Get from Anthropic Console")
-if not SUPABASE_URL:
-    missing_vars.append("SUPABASE_URL: Get from Supabase project settings")
-if not SUPABASE_SERVICE_KEY:
-    missing_vars.append("SUPABASE_SERVICE_KEY: Get from Supabase project settings (service_role key)")
+    missing_vars.append("TELEGRAM_BOT_TOKEN: Get from @BotFather on Telegram")
+if not GOA_API_KEY:
+    missing_vars.append("GOA_API_KEY: Need Goa API key for telegram-bot participant")
 
 if missing_vars:
     error_msg = "Missing required environment variables:\n" + "\n".join(
@@ -56,7 +46,7 @@ if missing_vars:
 
 # Constants
 APP_NAME = "educational_assistant"
-MAX_MESSAGE_LENGTH = 4096  # Telegram message length limit
+MAX_MESSAGE_LENGTH = 4096
 
 # Proactive outreach settings
 OUTREACH_CHECK_INTERVAL_SECONDS = int(os.getenv("OUTREACH_CHECK_INTERVAL_SECONDS", "3133"))
@@ -66,7 +56,6 @@ OUTREACH_COOLDOWN_HOURS = int(os.getenv("OUTREACH_COOLDOWN_HOURS", "21"))
 # Logging configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# Configure logging with UTF-8 encoding for Arabic text
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="[%(asctime)s] %(levelname)s: %(message)s",
@@ -76,7 +65,6 @@ logging.basicConfig(
     ],
 )
 
-# Set UTF-8 encoding for output (Docker compatibility)
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
