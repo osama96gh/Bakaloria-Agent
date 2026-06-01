@@ -293,6 +293,7 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
     
     # Run Agent
     response_parts = []
+    final_response_seen = False
     try:
         events = runner.run_async(
             user_id=user_id,
@@ -300,12 +301,12 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
             new_message=content
         )
         async for event in events:
-            if event.content and event.content.parts:
+            if not final_response_seen and event.content and event.content.parts:
                 for part in event.content.parts:
                     if part.text and not getattr(part, 'thought', False):
                         response_parts.append(part.text)
             if event.is_final_response():
-                break
+                final_response_seen = True
                 
         final_response = "".join(response_parts)
     except Exception as e:
