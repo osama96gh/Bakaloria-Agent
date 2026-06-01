@@ -1,5 +1,26 @@
 services:
-  bot:
+  # The Telegram Initiator (Client)
+  telegram_service:
     build: .
+    command: python -m telegram_service.main
     env_file: .env
     restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./telegram_service:/app/telegram_service:ro
+    environment:
+      - PYTHONPATH=/app
+    depends_on:
+      - bulbul_agent
+
+  # The Bulbul Agent (Responder)
+  bulbul_agent:
+    build: .
+    command: python -m bulbul_agent.main
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./bulbul_agent:/app/bulbul_agent:ro
+    environment:
+      - PYTHONPATH=/app

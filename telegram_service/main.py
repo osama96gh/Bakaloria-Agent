@@ -1,23 +1,9 @@
 """
 Telegram Bot for Educational Assistant Agent.
 
-Main entry point for the Telegram bot application that provides educational
-assistance to high school students in Arabic.
+Main entry point for the Telegram bot application. This acts purely as an
+interface to Goa, sending all messages and commands to the bulbul agent.
 """
-
-# Load environment variables FIRST, before any other imports
-from pathlib import Path
-from dotenv import load_dotenv
-
-env_paths = [
-    Path(__file__).parent / ".env",
-    Path("/app/.env"),
-    Path(".env"),
-]
-for env_path in env_paths:
-    if env_path.exists():
-        load_dotenv(env_path)
-        break
 
 import asyncio
 import logging
@@ -32,27 +18,27 @@ from telegram.ext import (
     filters,
 )
 
-from core import process_agent_query
-from core.outreach_service import outreach_service
-from telegram_bot import (
+from .telegram_bot.handlers import (
+    ask_agent_via_goa,
     error_handler,
+    get_or_create_goa_task,
     handle_message,
     handle_photo_message,
-    handle_voice_message,
     help_command,
     new_command,
     reset_persona_command,
-    session_manager,
     start_command,
+    handle_voice_message,
 )
-from telegram_bot.config import (
+from .telegram_bot.config import (
     APP_NAME,
     OUTREACH_CHECK_INTERVAL_SECONDS,
     OUTREACH_COOLDOWN_HOURS,
     OUTREACH_INACTIVITY_HOURS,
     TELEGRAM_BOT_TOKEN,
 )
-from telegram_bot.utils import sanitize_html_for_telegram, split_message
+from .telegram_bot.utils import sanitize_html_for_telegram, split_message
+from bulbul_agent.core.outreach_service import outreach_service
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +58,11 @@ def _build_outreach_prompt(hours_inactive: float) -> str:
 
 
 async def outreach_job(context: CallbackContext) -> None:
-    """Periodic job that checks for inactive users and sends proactive messages."""
+    """Periodic job that checks inactive users and sends proactive messages."""
     if not outreach_service:
         return
 
     logger.info("Running proactive outreach check...")
-
     candidates = outreach_service.get_outreach_candidates(
         platform="telegram",
         inactivity_hours=OUTREACH_INACTIVITY_HOURS,
@@ -92,7 +77,6 @@ async def outreach_job(context: CallbackContext) -> None:
         user_id = user["platform_user_id"]
         chat_id = user["chat_id"]
 
-        # Calculate hours since last interaction
         last_interaction = datetime.fromisoformat(
             user["last_interaction_at"].replace("Z", "+00:00")
         )
@@ -101,37 +85,24 @@ async def outreach_job(context: CallbackContext) -> None:
         ).total_seconds() / 3600
 
         try:
-            # Get existing session for continuity
-            session_id = session_manager.get_or_create_session(int(user_id))
-
-            # Ask the agent to decide
-            prompt = _build_outreach_prompt(hours_inactive)
-            result = await process_agent_query(
-                query=prompt,
-                user_id=user_id,
-                session_id=session_id,
-                app_name=APP_NAME,
+            task_id = await get_or_create_goa_task(int(user_id))
+            result = await ask_agent_via_goa(
+                task_id,
+                _build_outreach_prompt(hours_inactive),
             )
 
             if result["status"] != "success":
-                logger.warning(f"Outreach agent error for user {user_id}: {result.get('error')}")
+                logger.warning(
+                    f"Outreach agent error for user {user_id}: {result.get('error')}"
+                )
                 continue
 
             response = result["response"].strip()
-
-            # Agent decided to skip
             if response == "SKIP" or not response:
                 logger.info(f"Agent decided to skip outreach for user {user_id}")
                 continue
 
-            # Store session if new
-            if result.get("session_id"):
-                session_manager.store_session(int(user_id), result["session_id"])
-
-            # Send the proactive message
-            sanitized = sanitize_html_for_telegram(response)
-            chunks = split_message(sanitized)
-
+            chunks = split_message(sanitize_html_for_telegram(response))
             for i, chunk in enumerate(chunks):
                 try:
                     await context.bot.send_message(
@@ -140,21 +111,15 @@ async def outreach_job(context: CallbackContext) -> None:
                         parse_mode="HTML",
                     )
                 except BadRequest:
-                    # Fallback without HTML
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=chunk,
-                    )
+                    await context.bot.send_message(chat_id=chat_id, text=chunk)
 
                 if i < len(chunks) - 1:
                     await asyncio.sleep(0.5)
 
-            # Record successful outreach
             outreach_service.record_outreach("telegram", user_id)
             logger.info(f"Sent proactive outreach to user {user_id}")
 
         except Forbidden:
-            # User blocked the bot — disable outreach for them
             logger.warning(f"User {user_id} blocked the bot, disabling outreach")
             try:
                 outreach_service._client.table("user_engagement").update(
@@ -171,15 +136,13 @@ async def outreach_job(context: CallbackContext) -> None:
 def main() -> None:
     """
     Main function to set up and run the Telegram bot.
-
-    Sets up handlers for commands and messages, then starts polling
-    for updates from Telegram.
     """
-    logger.info("Starting Educational Assistant Telegram Bot")
+    logger.info("Starting Educational Assistant Telegram Bot (Decoupled)")
     logger.info(f"App name: {APP_NAME}")
-    logger.info(f"Active sessions: {session_manager.get_active_sessions_count()}")
 
     # Create the Application
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Register command handlers
@@ -193,25 +156,25 @@ def main() -> None:
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
-    # Register handler for photo messages (with or without caption)
+    # Register handler for photo messages
     application.add_handler(
         MessageHandler(filters.PHOTO, handle_photo_message)
     )
-
+    
     # Register handler for voice messages
     application.add_handler(
         MessageHandler(filters.VOICE, handle_voice_message)
     )
 
     # Register error handler
-    application.add_error_handler(error_handler)
+    application.add_error_handler(error_handler) # type: ignore
 
     # Register proactive outreach scheduled job
     if outreach_service and application.job_queue:
         application.job_queue.run_repeating(
             outreach_job,
             interval=OUTREACH_CHECK_INTERVAL_SECONDS,
-            first=60,  # First run 60 seconds after startup
+            first=60,
             name="outreach_job",
         )
         logger.info(
@@ -226,9 +189,9 @@ def main() -> None:
     logger.info("Bot handlers registered successfully")
     logger.info("Starting polling...")
 
-    # Start the Bot - run_polling() manages its own event loop
+    # Start the Bot
     application.run_polling(
-        drop_pending_updates=True,  # Ignore messages sent while bot was offline
+        drop_pending_updates=True,
         allowed_updates=["message", "edited_message"],
     )
 
