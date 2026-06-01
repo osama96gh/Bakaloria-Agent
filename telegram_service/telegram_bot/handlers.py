@@ -20,6 +20,7 @@ from .utils import (
     sanitize_html_for_telegram,
     split_message,
 )
+from bulbul_agent.core.outreach_service import outreach_service
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +52,29 @@ async def get_or_create_goa_task(user_id: int) -> str:
     return data["task"]["id"]
 
 
-async def reset_goa_task(user_id: int) -> None:
+async def reset_goa_task(user_id: int) -> bool:
     """Closes the current Goa task for the user, forcing a fresh session on next upsert."""
     try:
         task_id = await get_or_create_goa_task(user_id)
-        await _goa_request("POST", f"/tasks/{task_id}/close")
+        resp = await _goa_request("POST", f"/tasks/{task_id}/close")
+        resp.raise_for_status()
         logger.info(f"Closed Goa task {task_id} for user {user_id}")
+        return True
     except Exception as e:
         logger.error(f"Failed to reset task for user {user_id}: {e}")
+        return False
+
+
+def record_user_engagement(update: Update) -> None:
+    """Record a Telegram user interaction for proactive outreach."""
+    if not outreach_service or not update.effective_user or not update.effective_chat:
+        return
+
+    outreach_service.update_interaction(
+        "telegram",
+        str(update.effective_user.id),
+        update.effective_chat.id,
+    )
 
 
 async def ask_agent_via_goa(task_id: str, text: str, image_bytes: Optional[bytes] = None, image_mime: str = "") -> dict:
@@ -180,6 +196,7 @@ async def forward_to_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, q
 # Command Handlers - they just forward the command text to the agent!
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.message:
+        record_user_engagement(update)
         await send_reply_with_retry(
             update.message,
             "مرحباً! أنا مساعدك الذكي القابل للتخصيص ✨\n\n"
@@ -193,6 +210,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.message:
+        record_user_engagement(update)
         await send_reply_with_retry(
             update.message,
             "📖 كيفية استخدام المساعد الذكي\n\n"
@@ -213,8 +231,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.message:
+        record_user_engagement(update)
         # Reset the Goa task on our side so we get a fresh session
-        await reset_goa_task(update.effective_user.id)
+        reset_succeeded = await reset_goa_task(update.effective_user.id)
+        if not reset_succeeded:
+            await send_reply_with_retry(
+                update.message,
+                "عذراً، لم أتمكن من بدء محادثة جديدة الآن. يرجى المحاولة مرة أخرى.",
+                parse_mode=None,
+            )
+            return
+
         await send_reply_with_retry(
             update.message,
             "تم بدء محادثة جديدة! 🆕\n\n"
@@ -225,14 +252,22 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def reset_persona_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.message:
+        record_user_engagement(update)
         await forward_to_agent(update, context, "/reset_persona")
         # The agent handles resetting the persona in Supabase. We also reset the task.
-        await reset_goa_task(update.effective_user.id)
+        reset_succeeded = await reset_goa_task(update.effective_user.id)
+        if not reset_succeeded:
+            await send_reply_with_retry(
+                update.message,
+                "تنبيه: تمت محاولة إعادة تعيين الشخصية، لكن لم أتمكن من مسح سجل المحادثة. يرجى استخدام /new أو المحاولة مرة أخرى.",
+                parse_mode=None,
+            )
 
 
 # Message Handlers
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.message and update.message.text:
+        record_user_engagement(update)
         await forward_to_agent(update, context, update.message.text.strip())
 
 
@@ -240,6 +275,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not update.effective_user or not update.message:
         return
 
+    record_user_engagement(update)
     query_text = (update.message.caption or "ما هذا؟").strip()
     photo_bytes, mime_type = await download_photo(update, context)
     
@@ -268,8 +304,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not update.effective_user or not update.message or not update.effective_chat:
         return
 
-    user_id = update.effective_user.id
-    
+    record_user_engagement(update)
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     
     try:
