@@ -3,9 +3,10 @@ Telegram bot handlers for messages and commands, acting purely as a delivery hub
 """
 
 import asyncio
+import json
 import logging
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 import httpx
 
 from telegram import Update
@@ -20,12 +21,20 @@ from .utils import (
     sanitize_html_for_telegram,
     split_message,
 )
+from .ui import (
+    build_goal_card_markup,
+    build_outreach_markup,
+    build_pause_confirm_markup,
+    build_settings_markup,
+    goal_card_text,
+)
 from bulbul_agent.core.outreach_service import outreach_service
 
 logger = logging.getLogger(__name__)
 
 MAX_SEND_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.0
+POLL_CONTEXTS: Dict[str, Dict[str, Any]] = {}
 
 
 async def _goa_request(method: str, path: str, **kwargs) -> httpx.Response:
@@ -41,25 +50,48 @@ async def _goa_request(method: str, path: str, **kwargs) -> httpx.Response:
         return await client.request(method, url, headers=headers, **kwargs)
 
 
-async def get_or_create_goa_task(user_id: int) -> str:
-    """Finds or creates a Goa task (session) for the Telegram user."""
-    resp = await _goa_request("POST", "/tasks/upsert", json={
-        "external_ref": f"telegram_{user_id}",
-        "on_create": {}
-    })
+async def get_or_create_goa_task(
+    user_id: int,
+    purpose: str = "chat",
+    parent_task_id: Optional[str] = None,
+) -> str:
+    """Finds or creates a Goa task for the Telegram user and purpose."""
+    external_ref = f"telegram_{user_id}"
+    if purpose != "chat":
+        external_ref = f"{external_ref}_{purpose}"
+
+    on_create = {}
+    if parent_task_id:
+        on_create["parent_task_id"] = parent_task_id
+        on_create["subject"] = f"{purpose} for telegram_{user_id}"
+
+    payload = {
+        "external_ref": external_ref,
+        "on_create": on_create
+    }
+    resp = await _goa_request("POST", "/tasks/upsert", json=payload)
     resp.raise_for_status()
     data = resp.json()
     return data["task"]["id"]
+
+
+async def close_goa_task(task_id: str) -> bool:
+    """Close a Goa task by id."""
+    try:
+        resp = await _goa_request("POST", f"/tasks/{task_id}/close")
+        resp.raise_for_status()
+        logger.info(f"Closed Goa task {task_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to close Goa task {task_id}: {e}")
+        return False
 
 
 async def reset_goa_task(user_id: int) -> bool:
     """Closes the current Goa task for the user, forcing a fresh session on next upsert."""
     try:
         task_id = await get_or_create_goa_task(user_id)
-        resp = await _goa_request("POST", f"/tasks/{task_id}/close")
-        resp.raise_for_status()
-        logger.info(f"Closed Goa task {task_id} for user {user_id}")
-        return True
+        return await close_goa_task(task_id)
     except Exception as e:
         logger.error(f"Failed to reset task for user {user_id}: {e}")
         return False
@@ -120,7 +152,11 @@ async def ask_agent_via_goa(task_id: str, text: str, image_bytes: Optional[bytes
             for ev in events:
                 if ev.get("event_type") == "answer" and ev.get("in_reply_to") == question_id:
                     answer_text = ev.get("content", {}).get("text", "")
-                    return {"status": "success", "response": answer_text}
+                    return {
+                        "status": "success",
+                        "response": answer_text,
+                        "ui": ev.get("payload", {}).get("ui"),
+                    }
                     
         return {"status": "error", "error": "Timeout waiting for agent response"}
         
@@ -129,16 +165,22 @@ async def ask_agent_via_goa(task_id: str, text: str, image_bytes: Optional[bytes
         return {"status": "error", "error": str(e)}
 
 
-async def send_reply_with_retry(message, text: str, parse_mode: Optional[str] = "HTML", max_retries: int = MAX_SEND_RETRIES) -> bool:
+async def send_reply_with_retry(
+    message,
+    text: str,
+    parse_mode: Optional[str] = "HTML",
+    max_retries: int = MAX_SEND_RETRIES,
+    reply_markup=None,
+) -> bool:
     """Send a reply message with retry logic for timeouts and formatting issues."""
     for attempt in range(max_retries):
         try:
-            await message.reply_text(text, parse_mode=parse_mode)
+            await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
             return True
         except BadRequest as e:
             if "Can't parse entities" in str(e) and parse_mode == "HTML":
                 try:
-                    await message.reply_text(text, parse_mode=None)
+                    await message.reply_text(text, parse_mode=None, reply_markup=reply_markup)
                     return True
                 except TimedOut:
                     if attempt < max_retries - 1:
@@ -153,6 +195,111 @@ async def send_reply_with_retry(message, text: str, parse_mode: Optional[str] = 
             else:
                 return False
     return False
+
+
+async def send_text_with_retry(
+    bot,
+    chat_id: int,
+    text: str,
+    parse_mode: Optional[str] = "HTML",
+    max_retries: int = MAX_SEND_RETRIES,
+    reply_markup=None,
+) -> bool:
+    for attempt in range(max_retries):
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+            return True
+        except BadRequest as e:
+            if "Can't parse entities" in str(e) and parse_mode == "HTML":
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=None,
+                    reply_markup=reply_markup,
+                )
+                return True
+            raise
+        except TimedOut:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+            else:
+                return False
+    return False
+
+
+async def render_agent_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
+    if result["status"] != "success":
+        if update.message:
+            await send_reply_with_retry(update.message, "عذراً، واجهت مشكلة في الاتصال بالوكيل الذكي.", parse_mode=None)
+        return
+
+    ui = result.get("ui") or {}
+    if ui.get("type") == "goal_cards":
+        goals = ui.get("goals") or []
+        if goals and update.message:
+            for goal in goals:
+                await send_reply_with_retry(
+                    update.message,
+                    sanitize_html_for_telegram(goal_card_text(goal)),
+                    reply_markup=build_goal_card_markup(goal.get("goal_id", "")),
+                )
+            return
+
+    sanitized = sanitize_html_for_telegram(result["response"])
+    chunks = split_message(sanitized)
+    if update.message:
+        for chunk in chunks:
+            await send_reply_with_retry(update.message, chunk)
+
+
+async def send_agent_text(
+    *,
+    user_id: int,
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    query_text: str,
+    reply_message=None,
+    render_response: bool = True,
+) -> dict:
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    task_id = await get_or_create_goa_task(user_id)
+    result = await ask_agent_via_goa(task_id, query_text)
+
+    if render_response:
+        ui = result.get("ui") or {}
+        if ui.get("type") == "goal_cards":
+            goals = ui.get("goals") or []
+            if goals:
+                for goal in goals:
+                    text = sanitize_html_for_telegram(goal_card_text(goal))
+                    if reply_message:
+                        await send_reply_with_retry(
+                            reply_message,
+                            text,
+                            reply_markup=build_goal_card_markup(goal.get("goal_id", "")),
+                        )
+                    else:
+                        await send_text_with_retry(
+                            context.bot,
+                            chat_id,
+                            text,
+                            reply_markup=build_goal_card_markup(goal.get("goal_id", "")),
+                        )
+                return result
+
+        response = sanitize_html_for_telegram(result.get("response", ""))
+        for chunk in split_message(response):
+            if reply_message:
+                await send_reply_with_retry(reply_message, chunk)
+            else:
+                await send_text_with_retry(context.bot, chat_id, chunk)
+
+    return result
 
 
 async def download_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> tuple[Optional[bytes], str]:
@@ -180,17 +327,169 @@ async def forward_to_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, q
     try:
         task_id = await get_or_create_goa_task(user_id)
         result = await ask_agent_via_goa(task_id, query_text, photo_bytes, mime_type)
-
-        if result["status"] == "success":
-            sanitized = sanitize_html_for_telegram(result["response"])
-            chunks = split_message(sanitized)
-            for chunk in chunks:
-                await send_reply_with_retry(update.message, chunk)
-        else:
-            await send_reply_with_retry(update.message, "عذراً، واجهت مشكلة في الاتصال بالوكيل الذكي.", parse_mode=None)
+        await render_agent_result(update, context, result)
     except Exception as e:
         logger.exception(f"Error handling message: {e}")
         await send_reply_with_retry(update.message, format_error_message(e), parse_mode=None)
+
+
+def _synthetic_goal_prompt(action: str, goal_id: str) -> str:
+    prompts = {
+        "continue": f"تابع معي الهدف {goal_id}. أعطني الخطوة التالية بشكل مختصر وعملي.",
+        "done": f"اعتبر أنني أنجزت الخطوة الحالية في الهدف {goal_id}. حدّث التقدم واقترح الخطوة التالية.",
+        "pause_confirm": f"أريد إيقاف الهدف {goal_id} مؤقتاً. حدّث حالة الهدف بعد موافقتي.",
+        "details": f"اعرض تفاصيل الهدف {goal_id}: الحالة، التقدم، الخطوات المكتملة، الخطوة الحالية، والخطوة التالية.",
+    }
+    return prompts.get(action, f"تابع الهدف {goal_id}.")
+
+
+def _parse_quiz_response(text: str) -> Optional[dict]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+    question = str(data.get("question") or "").strip()
+    options = data.get("options") or []
+    correct_index = data.get("correct_index")
+    explanation = str(data.get("explanation") or "").strip()
+
+    if not question or not isinstance(options, list) or len(options) < 2:
+        return None
+    if not isinstance(correct_index, int) or correct_index < 0 or correct_index >= len(options):
+        return None
+
+    return {
+        "question": question[:300],
+        "options": [str(option)[:100] for option in options[:10]],
+        "correct_index": correct_index,
+        "explanation": explanation[:200],
+    }
+
+
+async def _send_goal_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, goal_id: str) -> None:
+    query = update.callback_query
+    if not query or not query.message or not query.from_user:
+        return
+
+    prompt = (
+        f"أنشئ سؤال اختبار قصير للهدف {goal_id}. "
+        "أجب JSON فقط بدون أي شرح خارج JSON وبالشكل التالي: "
+        '{"question":"...","options":["...","...","..."],"correct_index":0,"explanation":"..."}'
+    )
+    result = await send_agent_text(
+        user_id=query.from_user.id,
+        chat_id=query.message.chat_id,
+        context=context,
+        query_text=prompt,
+        render_response=False,
+    )
+    quiz = _parse_quiz_response(result.get("response", "")) if result.get("status") == "success" else None
+    if not quiz:
+        await query.message.reply_text(
+            "لم أتمكن من تجهيز اختبار مناسب الآن. جرّب مرة ثانية بعد قليل.",
+        )
+        return
+
+    sent = await context.bot.send_poll(
+        chat_id=query.message.chat_id,
+        question=quiz["question"],
+        options=quiz["options"],
+        type="quiz",
+        correct_option_id=quiz["correct_index"],
+        explanation=quiz["explanation"] or None,
+        is_anonymous=False,
+    )
+    POLL_CONTEXTS[sent.poll.id] = {
+        "goal_id": goal_id,
+        "user_id": query.from_user.id,
+        "chat_id": query.message.chat_id,
+        "correct_index": quiz["correct_index"],
+    }
+
+
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    data = query.data or ""
+    if data == "goal:cancel":
+        if query.message:
+            await query.message.reply_text("تمام، ما غيرت شيئاً.")
+        return
+
+    if data.startswith("settings:"):
+        if data == "settings:output:voice_disabled":
+            await query.answer("Voice replies are planned but disabled for now.", show_alert=True)
+            return
+        if query.message and query.from_user:
+            await send_agent_text(
+                user_id=query.from_user.id,
+                chat_id=query.message.chat_id,
+                context=context,
+                query_text=f"حدّث تفضيلاتي بناءً على هذا الاختيار: {data}",
+                reply_message=query.message,
+            )
+        return
+
+    if data.startswith("outreach:"):
+        if data == "outreach:later":
+            await query.answer("No problem. I’ll check in later.")
+            return
+        if data == "outreach:goals" and query.message and query.from_user:
+            await send_agent_text(
+                user_id=query.from_user.id,
+                chat_id=query.message.chat_id,
+                context=context,
+                query_text="/goals",
+                reply_message=query.message,
+            )
+            return
+        if data.startswith("outreach:continue") and query.message and query.from_user:
+            parts = data.split(":")
+            goal_id = parts[2] if len(parts) > 2 else ""
+            prompt = _synthetic_goal_prompt("continue", goal_id) if goal_id else "تابع معي آخر هدف نشط واقترح خطوة صغيرة الآن."
+            await send_agent_text(
+                user_id=query.from_user.id,
+                chat_id=query.message.chat_id,
+                context=context,
+                query_text=prompt,
+                reply_message=query.message,
+            )
+            return
+
+    if not data.startswith("goal:") or not query.message or not query.from_user:
+        return
+
+    parts = data.split(":", 2)
+    if len(parts) != 3:
+        return
+    action, goal_id = parts[1], parts[2]
+
+    if action == "pause":
+        await query.message.reply_text(
+            "هل تريد إيقاف هذا الهدف مؤقتاً؟",
+            reply_markup=build_pause_confirm_markup(goal_id),
+        )
+        return
+    if action == "quiz":
+        await _send_goal_quiz(update, context, goal_id)
+        return
+
+    await send_agent_text(
+        user_id=query.from_user.id,
+        chat_id=query.message.chat_id,
+        context=context,
+        query_text=_synthetic_goal_prompt(action, goal_id),
+        reply_message=query.message,
+    )
 
 
 # Command Handlers - they just forward the command text to the agent!
@@ -203,6 +502,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "الأوامر المتاحة:\n"
             "/help - عرض المساعدة\n"
             "/new - بدء محادثة جديدة\n"
+            "/goals - عرض أهدافك وتقدمك\n"
             "/reset_persona - إعادة تعيين شخصيتي والبدء من جديد\n\n"
             "أرسل أي رسالة وسأتعرف عليك! 🎓",
             parse_mode=None,
@@ -219,6 +519,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "/start - رسالة الترحيب\n"
             "/help - عرض هذه المساعدة\n"
             "/new - بدء محادثة جديدة (نسيان المحادثة السابقة)\n"
+            "/goals - عرض أهدافك وتقدمك\n"
             "/reset_persona - إعادة تعيين شخصيتي والبدء من جديد\n\n"
             "كيفية تخصيصي:\n"
             "• أخبرني باسمك المفضل لي\n"
@@ -228,6 +529,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "فقط أرسل رسالتك وسأساعدك! 💡",
             parse_mode=None,
         )
+
+async def goals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user and update.message:
+        record_user_engagement(update)
+        await forward_to_agent(update, context, "/goals")
+
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user and update.message:
+        record_user_engagement(update)
+        await send_reply_with_retry(
+            update.message,
+            "<b>Settings</b>\nChoose how you want Bulbul to respond.\n\nVoice replies are planned but disabled until a TTS provider is configured.",
+            reply_markup=build_settings_markup(),
+        )
+
 
 async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.message:
@@ -254,7 +571,7 @@ async def reset_persona_command(update: Update, context: ContextTypes.DEFAULT_TY
     if update.effective_user and update.message:
         record_user_engagement(update)
         await forward_to_agent(update, context, "/reset_persona")
-        # The agent handles resetting the persona in Supabase. We also reset the task.
+        # The agent handles resetting the persona in Goa. We also reset the task.
         reset_succeeded = await reset_goa_task(update.effective_user.id)
         if not reset_succeeded:
             await send_reply_with_retry(
@@ -335,6 +652,30 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.exception(f"Error handling voice message: {e}")
         await send_reply_with_retry(update.message, format_error_message(e), parse_mode=None)
+
+
+async def poll_answer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    poll_answer = update.poll_answer
+    if not poll_answer:
+        return
+
+    poll_context = POLL_CONTEXTS.get(poll_answer.poll_id)
+    if not poll_context:
+        return
+
+    selected = poll_answer.option_ids[0] if poll_answer.option_ids else None
+    is_correct = selected == poll_context["correct_index"]
+    result_text = "صحيحة" if is_correct else "غير صحيحة"
+    prompt = (
+        f"نتيجة اختبار الهدف {poll_context['goal_id']}: إجابة المستخدم {result_text}. "
+        "حدّث تقدم الهدف باختصار، وإذا كانت الإجابة غير صحيحة فاقترح مراجعة صغيرة."
+    )
+    await send_agent_text(
+        user_id=poll_context["user_id"],
+        chat_id=poll_context["chat_id"],
+        context=context,
+        query_text=prompt,
+    )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

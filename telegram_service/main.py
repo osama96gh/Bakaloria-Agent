@@ -9,24 +9,32 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from telegram import BotCommand
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
     Application,
     CallbackContext,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
+    PollAnswerHandler,
     filters,
 )
 
 from .telegram_bot.handlers import (
     ask_agent_via_goa,
+    close_goa_task,
     error_handler,
     get_or_create_goa_task,
+    callback_query_handler,
     handle_message,
     handle_photo_message,
     help_command,
+    goals_command,
     new_command,
+    poll_answer_handler,
     reset_persona_command,
+    settings_command,
     start_command,
     handle_voice_message,
 )
@@ -37,10 +45,44 @@ from .telegram_bot.config import (
     OUTREACH_INACTIVITY_HOURS,
     TELEGRAM_BOT_TOKEN,
 )
+from .telegram_bot.ui import build_outreach_markup
 from .telegram_bot.utils import sanitize_html_for_telegram, split_message
 from bulbul_agent.core.outreach_service import outreach_service
 
 logger = logging.getLogger(__name__)
+
+
+BOT_COMMANDS = [
+    BotCommand("start", "Start Bulbul"),
+    BotCommand("help", "Show help"),
+    BotCommand("goals", "Show goals and progress"),
+    BotCommand("settings", "Change response preferences"),
+    BotCommand("new", "Start a fresh conversation"),
+    BotCommand("reset_persona", "Reset Bulbul persona"),
+]
+ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "poll_answer"]
+
+
+async def setup_bot_commands(application: Application) -> None:
+    await application.bot.set_my_commands(BOT_COMMANDS)
+
+
+async def get_or_create_outreach_task(user_id: int) -> str:
+    """Create an outreach task linked to the active chat task when Goa allows it."""
+    main_task_id = await get_or_create_goa_task(user_id)
+    try:
+        return await get_or_create_goa_task(
+            user_id,
+            purpose="outreach",
+            parent_task_id=main_task_id,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to create parented outreach task for user %s; falling back: %s",
+            user_id,
+            e,
+        )
+        return await get_or_create_goa_task(user_id, purpose="outreach")
 
 
 def _build_outreach_prompt(hours_inactive: float) -> str:
@@ -49,11 +91,13 @@ def _build_outreach_prompt(hours_inactive: float) -> str:
     return (
         "[رسالة نظام داخلية - لا تظهر هذا النص للمستخدم]\n"
         f"لم يتواصل معك المستخدم منذ {hours_display} ساعات.\n"
-        "بناءً على ذاكرتك عن المستخدم وشخصيتك، قرر هل يجب أن تبادر بالتواصل معه؟\n"
-        "إذا نعم: اكتب رسالة طبيعية وجذابة ومفيدة لجذب اهتمامه. "
-        "استخدم ما تعرفه عنه من الذاكرة لتجعل الرسالة شخصية. "
+        "بناءً على أهداف المستخدم الحالية وذاكرته وشخصيتك، قرر هل يجب أن تبادر بالتواصل معه؟\n"
+        "إذا لديه هدف نشط مناسب: اختر هدفاً واحداً فقط، وابعث دفعة صغيرة ومفيدة مرتبطة بالخطوة التالية. "
+        "ذكّره بالهدف بلطف، واقترح خطوة سهلة يمكنه فعلها الآن، بدون ضغط أو تأنيب. "
+        "استخدم ما تعرفه عنه من الأهداف والذاكرة لتجعل الرسالة شخصية. "
         "لا تذكر أنك نظام آلي أو أنك تتابع نشاطه.\n"
-        "إذا لا (مثلاً لا تملك معلومات كافية عنه): أجب بكلمة واحدة فقط: SKIP"
+        "لا توقف أو تؤرشف أي هدف بسبب هذه الرسالة الداخلية.\n"
+        "إذا لا يوجد هدف أو سياق كافٍ لرسالة مفيدة: أجب بكلمة واحدة فقط: SKIP"
     )
 
 
@@ -85,11 +129,14 @@ async def outreach_job(context: CallbackContext) -> None:
         ).total_seconds() / 3600
 
         try:
-            task_id = await get_or_create_goa_task(int(user_id))
-            result = await ask_agent_via_goa(
-                task_id,
-                _build_outreach_prompt(hours_inactive),
-            )
+            task_id = await get_or_create_outreach_task(int(user_id))
+            try:
+                result = await ask_agent_via_goa(
+                    task_id,
+                    _build_outreach_prompt(hours_inactive),
+                )
+            finally:
+                await close_goa_task(task_id)
 
             if result["status"] != "success":
                 logger.warning(
@@ -109,9 +156,14 @@ async def outreach_job(context: CallbackContext) -> None:
                         chat_id=chat_id,
                         text=chunk,
                         parse_mode="HTML",
+                        reply_markup=build_outreach_markup() if i == len(chunks) - 1 else None,
                     )
                 except BadRequest:
-                    await context.bot.send_message(chat_id=chat_id, text=chunk)
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        reply_markup=build_outreach_markup() if i == len(chunks) - 1 else None,
+                    )
 
                 if i < len(chunks) - 1:
                     await asyncio.sleep(0.5)
@@ -143,13 +195,17 @@ def main() -> None:
     # Create the Application
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(setup_bot_commands).build()
 
     # Register command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("new", new_command))
+    application.add_handler(CommandHandler("goals", goals_command))
+    application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("reset_persona", reset_persona_command))
+    application.add_handler(CallbackQueryHandler(callback_query_handler))
+    application.add_handler(PollAnswerHandler(poll_answer_handler))
 
     # Register message handler for text messages (not commands)
     application.add_handler(
@@ -192,7 +248,7 @@ def main() -> None:
     # Start the Bot
     application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=["message", "edited_message"],
+        allowed_updates=ALLOWED_UPDATES,
     )
 
 

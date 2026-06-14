@@ -36,10 +36,13 @@ for env_path in env_paths:
 
 from bulbul_agent.core.persona_service import PersonaService
 from bulbul_agent.core.memory_service import MemoryService
+from bulbul_agent.core.goal_service import GoalService
 from bulbul_agent.core.tools.persona_tool import init_persona_tool, update_persona
 from bulbul_agent.core.tools.memory_tool import init_memory_tool, manage_memory
+from bulbul_agent.core.tools.goal_tool import init_goal_tool, manage_goal
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+OUTREACH_PARENT_CONTEXT_EVENTS = int(os.getenv("OUTREACH_PARENT_CONTEXT_EVENTS", "30"))
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="[%(asctime)s] %(levelname)s: %(message)s",
@@ -50,20 +53,15 @@ logger = logging.getLogger(__name__)
 
 # Config
 GOA_URL = os.getenv("GOA_URL", "http://195.35.0.64").rstrip("/")
-GOA_API_KEY = os.getenv("GOA_API_KEY")
+GOA_API_KEY = os.getenv("GOA_AGENT_API_KEY") or os.getenv("GOA_API_KEY")
 if not GOA_API_KEY:
-    logger.error("GOA_API_KEY is required for bulbul agent to authenticate.")
-    sys.exit(1)
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.error("SUPABASE_URL and SUPABASE_SERVICE_KEY are required for persona/memory services.")
+    logger.error("GOA_AGENT_API_KEY or GOA_API_KEY is required for bulbul agent to authenticate.")
     sys.exit(1)
 
 # Services
-_persona_service = PersonaService(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY)
-_memory_service = MemoryService(supabase_url=SUPABASE_URL, supabase_key=SUPABASE_KEY)
+_persona_service = PersonaService(goa_url=GOA_URL, goa_api_key=GOA_API_KEY)
+_memory_service = MemoryService(goa_url=GOA_URL, goa_api_key=GOA_API_KEY)
+_goal_service = GoalService(goa_url=GOA_URL, goa_api_key=GOA_API_KEY)
 
 # Define Agent
 _search_agent = Agent(
@@ -91,6 +89,7 @@ _agent = Agent(
     tools=[
         update_persona,
         manage_memory,
+        manage_goal,
         AgentTool(agent=_search_agent),
         AgentTool(agent=_code_agent),
     ],
@@ -138,6 +137,52 @@ async def get_goa_task_events(task_id: str) -> List[dict]:
     return resp.json().get("events", [])
 
 
+def _user_id_from_external_ref(external_ref: str) -> str:
+    """Extract platform user id from refs like telegram_123 or telegram_123_outreach."""
+    parts = external_ref.split("_")
+    if len(parts) >= 2 and parts[0] == "telegram" and parts[1]:
+        return parts[1]
+    return "default_user"
+
+
+def _is_outreach_task(external_ref: str) -> bool:
+    return external_ref.endswith("_outreach")
+
+
+def _relevant_conversation_events(goa_events: List[dict], before_event_id: Optional[str] = None) -> List[dict]:
+    """Return conversational Goa events after the last /new and without command chatter."""
+    if before_event_id:
+        current_idx = next(
+            (i for i, ev in enumerate(goa_events) if ev["id"] == before_event_id),
+            len(goa_events),
+        )
+        events = goa_events[:current_idx]
+    else:
+        events = goa_events
+
+    last_new_idx = -1
+    for i, ev in enumerate(events):
+        if (
+            ev.get("event_type") == "question"
+            and ev.get("content", {}).get("text", "").strip() == "/new"
+        ):
+            last_new_idx = i
+
+    relevant_events = events[last_new_idx + 1:] if last_new_idx != -1 else events
+
+    command_question_ids = {
+        ev["id"]
+        for ev in relevant_events
+        if ev.get("event_type") == "question"
+        and ev.get("content", {}).get("text", "").strip().startswith("/")
+    }
+    return [
+        ev for ev in relevant_events
+        if ev.get("id") not in command_question_ids
+        and ev.get("in_reply_to") not in command_question_ids
+    ]
+
+
 def _goa_event_to_adk_event(goa_ev: dict) -> Event:
     """Convert Goa event into ADK event so we can feed it to the LLM."""
     content = None
@@ -169,6 +214,60 @@ def _goa_event_to_adk_event(goa_ev: dict) -> Event:
     )
 
 
+def _format_goals_for_state(goals: List[dict]) -> str:
+    if not goals:
+        return "لا توجد أهداف محفوظة بعد"
+
+    lines = []
+    for goal in goals:
+        completed_steps = goal.get("completed_steps") or []
+        completed_display = "، ".join(str(step) for step in completed_steps) if completed_steps else "لا يوجد"
+        block = [
+            f"- [{goal.get('goal_id')}] {goal.get('title')} ({goal.get('status')})",
+            f"  الوصف: {goal.get('description') or 'غير محدد'}",
+            f"  ملخص التقدم: {goal.get('progress_summary') or 'لا يوجد بعد'}",
+            f"  الخطوات المكتملة: {completed_display}",
+            f"  الخطوة الحالية: {goal.get('current_step') or 'غير محددة'}",
+            f"  الخطوة التالية: {goal.get('next_action') or 'غير محددة'}",
+        ]
+        if goal.get("archived_reason"):
+            block.append(f"  سبب الأرشفة: {goal.get('archived_reason')}")
+        lines.append("\n".join(block))
+    return "\n\n".join(lines)
+
+
+def _format_goals_reply(goals: List[dict]) -> str:
+    if not goals:
+        return "ما عندك أهداف محفوظة حالياً.\n\nإذا عندك هدف تعلّم أو هدف شخصي، قل لي عنه وبسألك إذا تحب أتابعه معك."
+
+    status_labels = {
+        "proposed": "مقترح",
+        "active": "نشط",
+        "paused": "متوقف مؤقتاً",
+        "completed": "مكتمل",
+        "archived": "مؤرشف",
+    }
+    lines = ["<b>أهدافك الحالية</b>"]
+    for goal in goals:
+        lines.extend([
+            "",
+            f"<b>{goal.get('title')}</b> <code>{goal.get('goal_id')}</code>",
+            f"الحالة: {status_labels.get(goal.get('status'), goal.get('status'))}",
+            f"التقدم: {goal.get('progress_summary') or 'لا يوجد ملخص بعد'}",
+            f"الخطوة الحالية: {goal.get('current_step') or 'غير محددة'}",
+            f"التالي: {goal.get('next_action') or 'غير محدد'}",
+        ])
+    lines.append("\nقل: كمل هدف goal-01، أو وقف الهدف، أو أرني تقدمي.")
+    return "\n".join(lines)
+
+
+def _goal_cards_ui(goals: List[dict]) -> dict:
+    return {
+        "type": "goal_cards",
+        "goals": goals,
+    }
+
+
 async def process_question(task_id: str, question_event_id: str, goa_events: List[dict]):
     """Processes a pending question via ADK."""
     
@@ -177,7 +276,7 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
     resp.raise_for_status()
     task_data = resp.json()["task"]
     ext_ref = task_data.get("external_ref", "")
-    user_id = ext_ref.split("_")[1] if "_" in ext_ref else "default_user"
+    user_id = _user_id_from_external_ref(ext_ref)
     
     logger.info(f"Processing question {question_event_id} for user {user_id}")
     
@@ -191,11 +290,11 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
     
     # Handle commands (simplistic intercept)
     if query_text == "/start":
-        reply = "مرحباً! أنا مساعدك الذكي القابل للتخصيص ✨\n\nالأوامر المتاحة:\n/help - عرض المساعدة\n/new - بدء محادثة جديدة\n/reset_persona - إعادة تعيين شخصيتي والبدء من جديد\n\nأرسل أي رسالة وسأتعرف عليك! 🎓"
+        reply = "مرحباً! أنا مساعدك الذكي القابل للتخصيص ✨\n\nالأوامر المتاحة:\n/help - عرض المساعدة\n/new - بدء محادثة جديدة\n/goals - عرض أهدافك وتقدمك\n/reset_persona - إعادة تعيين شخصيتي والبدء من جديد\n\nأرسل أي رسالة وسأتعرف عليك! 🎓"
         await post_answer(task_id, question_event_id, reply)
         return
     elif query_text == "/help":
-        reply = "📖 كيفية استخدام المساعد الذكي\n\nأنا مساعد قابل للتخصيص - يمكنك تحديد شخصيتي ودوري وأسلوبي!\n\nالأوامر المتاحة:\n/start - رسالة الترحيب\n/help - عرض هذه المساعدة\n/new - بدء محادثة جديدة (نسيان المحادثة السابقة)\n/reset_persona - إعادة تعيين شخصيتي والبدء من جديد\n\nكيفية تخصيصي:\n• أخبرني باسمك المفضل لي\n• حدد دوري (مدرس، صديق، مستشار، إلخ)\n• اختر أسلوب التواصل (رسمي، ودود، مرح)\n• حدد المجالات التي تريد مساعدة فيها\n\nنصائح:\n• يمكنني تذكر المحادثة والتفضيلات السابقة\n• إذا أردت تغيير شخصيتي، فقط أخبرني\n• استخدم /reset_persona للبدء من الصفر\n\nفقط أرسل رسالتك وسأساعدك! 💡"
+        reply = "📖 كيفية استخدام المساعد الذكي\n\nأنا مساعد قابل للتخصيص - يمكنك تحديد شخصيتي ودوري وأسلوبي!\n\nالأوامر المتاحة:\n/start - رسالة الترحيب\n/help - عرض هذه المساعدة\n/new - بدء محادثة جديدة (نسيان المحادثة السابقة)\n/goals - عرض أهدافك وتقدمك\n/reset_persona - إعادة تعيين شخصيتي والبدء من جديد\n\nكيفية تخصيصي:\n• أخبرني باسمك المفضل لي\n• حدد دوري (مدرس، صديق، مستشار، إلخ)\n• اختر أسلوب التواصل (رسمي، ودود، مرح)\n• حدد المجالات التي تريد مساعدة فيها\n\nالأهداف:\n• قل لي هدفاً تعليمياً أو شخصياً وسأسألك إذا تحب أتابعه\n• أقدر أعرض تقدمك وأقترح الخطوة التالية\n\nنصائح:\n• يمكنني تذكر المحادثة والتفضيلات السابقة\n• إذا أردت تغيير شخصيتي، فقط أخبرني\n• استخدم /reset_persona للبدء من الصفر\n\nفقط أرسل رسالتك وسأساعدك! 💡"
         await post_answer(task_id, question_event_id, reply)
         return
     elif query_text == "/new":
@@ -207,6 +306,15 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
         reply = "تم إعادة تعيين شخصية المساعد! 🔄\n\nتم مسح جميع التفضيلات والإعدادات السابقة.\nفي المحادثة القادمة، سأتعرف عليك من جديد وأتكيف مع تفضيلاتك.\n\nأرسل أي رسالة للبدء! ✨"
         await post_answer(task_id, question_event_id, reply)
         return
+    elif query_text == "/goals":
+        goals = await _goal_service.get_goals(user_id)
+        await post_answer(
+            task_id,
+            question_event_id,
+            _format_goals_reply(goals),
+            ui=_goal_cards_ui(goals) if goals else None,
+        )
+        return
     elif query_text.startswith("/"):
         # Ignore other commands
         await post_answer(task_id, question_event_id, "عذراً، أمر غير معروف.")
@@ -215,40 +323,40 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
     # Load State (Persona + Memory)
     persona = await _persona_service.get_persona(user_id)
     memories = await _memory_service.get_memories(user_id)
+    goals = await _goal_service.get_goals(
+        user_id,
+        statuses=("proposed", "active", "paused"),
+    )
     init_persona_tool(_persona_service, user_id)
     init_memory_tool(_memory_service, user_id)
+    init_goal_tool(_goal_service, user_id)
 
     initial_state = dict(persona)
     initial_state["current_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     initial_state["user_memories"] = "\n".join(f"- [{m['fact_id']}] {m['fact']}" for m in memories) if memories else "لا توجد ذكريات محفوظة بعد"
+    initial_state["user_goals"] = _format_goals_for_state(goals)
 
-    # Only use events that happened before this question. Goa may already contain
-    # late answers or retries for newer work, and those must not leak backward.
-    current_idx = next((i for i, ev in enumerate(goa_events) if ev["id"] == question_event_id), len(goa_events))
-    prior_goa_events = goa_events[:current_idx]
+    relevant_goa_events = []
+    parent_task_id = task_data.get("parent_task_id")
+    if _is_outreach_task(ext_ref) and parent_task_id:
+        try:
+            parent_goa_events = await get_goa_task_events(parent_task_id)
+            parent_relevant_events = _relevant_conversation_events(parent_goa_events)
+            relevant_goa_events.extend(parent_relevant_events[-OUTREACH_PARENT_CONTEXT_EVENTS:])
+            logger.info(
+                "Loaded %s parent context events for outreach task %s",
+                len(relevant_goa_events),
+                task_id,
+            )
+        except Exception as e:
+            logger.warning("Failed to load parent task context for outreach: %s", e)
 
-    # Find the index of the last /new command to truncate history
-    last_new_idx = -1
-    for i, ev in enumerate(prior_goa_events):
-        if ev.get("event_type") == "question" and ev.get("content", {}).get("text", "").strip() == "/new":
-            last_new_idx = i
-            
-    # Keep only events after the last /new
-    relevant_goa_events = prior_goa_events[last_new_idx + 1:] if last_new_idx != -1 else prior_goa_events
-
-    # Command questions and their canned answers are delivery-layer control flow,
-    # not conversational context for the LLM.
-    command_question_ids = {
-        ev["id"]
-        for ev in relevant_goa_events
-        if ev.get("event_type") == "question"
-        and ev.get("content", {}).get("text", "").strip().startswith("/")
-    }
-    relevant_goa_events = [
-        ev for ev in relevant_goa_events
-        if ev.get("id") not in command_question_ids
-        and ev.get("in_reply_to") not in command_question_ids
-    ]
+    # Only use current-task events that happened before this question. Goa may
+    # already contain late answers or retries for newer work, and those must not
+    # leak backward.
+    relevant_goa_events.extend(
+        _relevant_conversation_events(goa_events, before_event_id=question_event_id)
+    )
 
     # Convert Goa history to ADK history
     adk_history = [_goa_event_to_adk_event(ev) for ev in relevant_goa_events if ev["event_type"] in ("question", "answer")]
@@ -317,15 +425,19 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
     await post_answer(task_id, question_event_id, final_response)
 
 
-async def post_answer(task_id: str, question_id: str, text: str):
+async def post_answer(task_id: str, question_id: str, text: str, ui: Optional[dict] = None):
     """Posts an answer event to Goa."""
+    payload = {
+        "answering": [question_id]
+    }
+    if ui:
+        payload["ui"] = ui
+
     payload = {
         "event_type": "answer",
         "content": {"text": text},
         "in_reply_to": question_id,
-        "payload": {
-            "answering": [question_id]
-        }
+        "payload": payload,
     }
     resp = await _goa_request("POST", f"/tasks/{task_id}/events", json=payload)
     if resp.status_code == 201:

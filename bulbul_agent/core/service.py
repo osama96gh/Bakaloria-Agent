@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Service module for exposing the customizable Bulbul agent.
-
-This module provides the core ADK agent definition and Supabase services.
-"""
+"""Service module for exposing the customizable Bulbul agent."""
 
 import logging
 import os
@@ -29,29 +26,32 @@ from google.adk.tools.google_search_tool import GoogleSearchTool
 
 from .persona_service import PersonaService
 from .memory_service import MemoryService
+from .goal_service import GoalService
 from .tools.persona_tool import update_persona
 from .tools.memory_tool import manage_memory
+from .tools.goal_tool import manage_goal
 
 logger = logging.getLogger(__name__)
 
 # Module-level services - persist across the app lifecycle
-_supabase_url = os.getenv("SUPABASE_URL")
-_supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-
-# Validate Supabase configuration
-if not _supabase_url or not _supabase_key:
-    logger.warning("SUPABASE_URL and SUPABASE_SERVICE_KEY not found in environment.")
+_goa_url = os.getenv("GOA_URL")
+_goa_api_key = os.getenv("GOA_AGENT_API_KEY") or os.getenv("GOA_API_KEY")
 
 # Initialize persona service
 _persona_service = PersonaService(
-    supabase_url=_supabase_url,
-    supabase_key=_supabase_key,
+    goa_url=_goa_url,
+    goa_api_key=_goa_api_key,
 )
 
 # Initialize memory service
 _memory_service = MemoryService(
-    supabase_url=_supabase_url,
-    supabase_key=_supabase_key,
+    goa_url=_goa_url,
+    goa_api_key=_goa_api_key,
+)
+
+_goal_service = GoalService(
+    goa_url=_goa_url,
+    goa_api_key=_goa_api_key,
 )
 
 # Sub-agents for built-in tools (isolated to avoid function calling conflicts)
@@ -98,6 +98,7 @@ _agent = Agent(
     tools=[
         update_persona,
         manage_memory,
+        manage_goal,
         AgentTool(agent=_search_agent),
         AgentTool(agent=_code_agent),
     ],
@@ -118,5 +119,6 @@ __all__ = [
     '_agent',
     '_persona_service',
     '_memory_service',
+    '_goal_service',
     'reset_user_persona',
 ]

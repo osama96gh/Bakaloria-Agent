@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Dynamic Persona System**: Users can customize the bot's name, role, personality, dialect, and instructions
 - **User Memory Management**: Bot learns and stores facts about users across conversations
 - **Multi-modal Input**: Handles text messages, photos (with vision), and voice messages (with transcription)
-- **Persistent Sessions**: Supabase-backed storage for conversations, personas, and memories across platforms
+- **Persistent Sessions**: Goa-backed task/event history, persona, and memory, with Supabase still used for outreach data
 
 ## Development Commands
 
@@ -31,8 +31,10 @@ docker-compose up --build
 Required environment variables in `.env`:
 - `TELEGRAM_BOT_TOKEN`: From @BotFather
 - `ANTHROPIC_API_KEY`: From Anthropic Console (legacy, may not be actively used)
-- `SUPABASE_URL`: Supabase project URL
-- `SUPABASE_SERVICE_KEY`: Service role key from Supabase
+- `GOA_API_KEY`: Goa participant key used by the Telegram service and as a fallback for the agent
+- `GOA_AGENT_API_KEY`: Optional Goa participant key for the Bulbul agent; preferred for agent-owned persona/memory
+- `SUPABASE_URL`: Supabase project URL, required for outreach
+- `SUPABASE_SERVICE_KEY`: Service role key from Supabase, required for outreach
 - `LOG_LEVEL`: Optional (default: INFO)
 
 ## Architecture
@@ -50,11 +52,9 @@ The heart of the application is the **ADK Event Loop pattern** in `core/service.
 
 ### Service Modules
 
-- **`PersonaService`** (`persona_service.py`): Flexible key-value store for agent personality attributes. Any attribute can be stored (name, role, dialect, mission, etc.). Values are JSON-serialized if complex.
+- **`PersonaService`** (`persona_service.py`): Flexible Goa-backed key-value store for agent personality attributes. Any attribute can be stored (name, role, dialect, mission, etc.).
 
-- **`MemoryService`** (`memory_service.py`): Manages user memories/facts with sequential fact IDs (fact-01, fact-02, etc.). Supports add/update/remove operations.
-
-- **`SupabaseSessionService`** (`supabase_session_service.py`): Implements ADK's session interface for Supabase. Stores conversation history in `adk_sessions` table with JSONB state.
+- **`MemoryService`** (`memory_service.py`): Manages user memories/facts in Goa memory with sequential fact IDs (fact-01, fact-02, etc.). Supports add/update/remove operations.
 
 ### Agent Tools (`core/tools/`)
 
@@ -66,8 +66,6 @@ Two tools available to the agent:
 **Tool Context Injection**: Tools are initialized with current `user_id` via `init_persona_tool()` and `init_memory_tool()` before each agent invocation. This pattern allows stateless tool functions to access user context.
 
 ### Telegram Layer (`telegram_bot/`)
-
-- **`SessionManager`** (`session_manager.py`): Maps platform user IDs (Telegram user IDs) to ADK session IDs. Stores mappings in `platform_user_sessions` table. Provides in-memory fallback if Supabase unavailable.
 
 - **Handlers** (`handlers.py`):
   - Text messages → `handle_message()`
@@ -89,32 +87,36 @@ Written in Arabic. Uses placeholder syntax like `{name?}` for runtime state inje
 
 **Important**: The `?` suffix in placeholders makes them optional—empty values don't break the prompt.
 
-## Database Schema (Supabase)
+## Persistence
 
-### Required Tables
+### Goa
 
-1. **`agent_persona`**: Key-value persona storage
-   - Primary key: `(user_id, key)`
-   - Columns: `user_id`, `key`, `value` (TEXT), `updated_at`
+1. **Task/event log**: Conversation tasks, question/answer events, pending work, and blobs.
+   - Normal Telegram chat uses `external_ref=telegram_{user_id}`.
+   - Proactive outreach decisions use `external_ref=telegram_{user_id}_outreach`, are created as child tasks of the active chat task when Goa accepts `parent_task_id`, and close after each decision to avoid cluttering the user chat history with internal SKIP checks.
+   - When processing an outreach child task, Bulbul loads a bounded slice of recent parent chat events (`OUTREACH_PARENT_CONTEXT_EVENTS`, default 30) so the outreach message can account for current session context without polluting the main task.
 
-2. **`user_memory`**: User facts/memories
-   - Primary key: `(user_id, fact_id)`
-   - Columns: `user_id`, `fact_id`, `fact`, `updated_at`
+2. **`/memory` user facts**: User memory facts under namespaced keys:
+   - `user:{user_id}:memory:{fact_id}`
+   - Values are JSON documents containing `fact`, `user_id`, and `fact_id`
 
-3. **`platform_user_sessions`**: Session mapping
-   - Columns: `platform`, `platform_user_id`, `session_id`, `is_active`, `updated_at`
+3. **`/memory` persona**: Agent persona values under namespaced keys:
+   - `user:{user_id}:persona:{key}`
+   - Values are JSON documents containing the persona `key` and `value`
 
-4. **`adk_sessions`**: ADK conversation history (managed by SupabaseSessionService)
-   - Columns: `id`, `app_name`, `user_id`, `state` (JSONB), `messages` (JSONB array), timestamps
+### Supabase
+
+1. **`user_engagement`**: Proactive outreach tracking
+   - Stores platform user IDs, chat IDs, last interaction time, outreach preferences, and last outreach time
 
 ## Key Patterns
 
 ### Adding a New Platform (beyond Telegram)
 
-1. Create a new session manager instance: `SessionManager(platform="web")`
-2. Map platform user IDs to ADK sessions using `get_or_create_session()` and `store_session()`
-3. Call `process_agent_query()` from `core/service.py` with `user_id` as string
-4. The shared agent instance and services work across all platforms
+1. Register or configure a Goa participant for the platform.
+2. Use `POST /tasks/upsert` with an `external_ref` like `web_{platform_user_id}`.
+3. Post user input as Goa `question` events targeted to the Bulbul participant.
+4. Let `bulbul_agent.main` process pending Goa questions and write answers back as Goa `answer` events.
 
 ### Extending Persona Attributes
 
@@ -135,5 +137,5 @@ Always use HTML tags in agent responses: `<b>`, `<i>`, `<code>`, `<pre>`, `<a hr
 - **Voice messages**: 2-minute max duration (enforced in handler)
 - **Telegram messages**: 4096 character limit (auto-split via `split_message()`)
 - **Image support**: Photos only (not documents). Largest resolution is downloaded.
-- **Supabase**: All services require Supabase connection—no in-memory fallback for persona/memory (only for session mapping)
+- **Supabase**: Outreach requires Supabase connection. Persona and user memories are read/written through Goa `/memory`.
 - **ADK Runner**: Each `Runner` instance should only be used once—create new for each query

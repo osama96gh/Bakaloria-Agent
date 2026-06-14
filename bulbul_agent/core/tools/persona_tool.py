@@ -105,7 +105,7 @@ async def update_persona(updates: str) -> Dict[str, Any]:
                 "saved_keys": []
             }
 
-        # Save to Supabase via PersonaService
+        # Save through PersonaService
         await _persona_service.set_values(_current_user_id, updates_dict)
 
         saved_keys = list(updates_dict.keys())
