@@ -5,10 +5,12 @@ Telegram bot handlers for messages and commands, acting purely as a delivery hub
 import asyncio
 import json
 import logging
+import time
+import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
 import httpx
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, TimedOut
 from telegram.ext import ContextTypes
@@ -35,6 +37,8 @@ MAX_SEND_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.0
 TYPING_REFRESH_SECONDS = 4.0
 POLL_CONTEXTS: Dict[str, Dict[str, Any]] = {}
+DYNAMIC_UI_ACTION_TTL_SECONDS = 15 * 60
+DYNAMIC_UI_ACTIONS: Dict[str, Dict[str, Any]] = {}
 
 
 async def _goa_request(method: str, path: str, **kwargs) -> httpx.Response:
@@ -250,6 +254,135 @@ async def send_text_with_retry(
     return False
 
 
+def _cleanup_dynamic_ui_actions() -> None:
+    now = time.monotonic()
+    expired = [
+        token for token, context in DYNAMIC_UI_ACTIONS.items()
+        if context.get("expires_at", 0) <= now
+    ]
+    for token in expired:
+        DYNAMIC_UI_ACTIONS.pop(token, None)
+
+
+def _build_dynamic_actions_markup(ui: dict, chat_id: int, user_id: Optional[int]) -> Optional[InlineKeyboardMarkup]:
+    if not isinstance(ui, dict) or ui.get("version") != 1:
+        return None
+
+    buttons = []
+    action_context: Dict[str, Dict[str, str]] = {}
+    token = uuid.uuid4().hex[:12]
+
+    for element in (ui.get("elements") or []):
+        if not isinstance(element, dict) or element.get("type") != "actions":
+            continue
+        for button in (element.get("buttons") or []):
+            if not isinstance(button, dict):
+                continue
+            label = str(button.get("label") or "").strip()[:64]
+            if not label:
+                continue
+            url = str(button.get("url") or "").strip()
+            if url.startswith(("http://", "https://")):
+                buttons.append(InlineKeyboardButton(label, url=url))
+                continue
+            prompt = str(button.get("prompt") or "").strip()
+            if not prompt:
+                continue
+            button_id = str(button.get("id") or f"action_{len(action_context) + 1}").strip()[:32]
+            action_context[button_id] = {"label": label, "prompt": prompt[:1000]}
+            buttons.append(InlineKeyboardButton(label, callback_data=f"ui:{token}:{button_id}"))
+
+    if action_context:
+        _cleanup_dynamic_ui_actions()
+        DYNAMIC_UI_ACTIONS[token] = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "expires_at": time.monotonic() + DYNAMIC_UI_ACTION_TTL_SECONDS,
+            "actions": action_context,
+        }
+
+    if not buttons:
+        return None
+
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows)
+
+
+def _dynamic_ui_elements(ui: dict, element_type: str) -> list[dict]:
+    if not isinstance(ui, dict) or ui.get("version") != 1:
+        return []
+    return [
+        element for element in (ui.get("elements") or [])
+        if isinstance(element, dict) and element.get("type") == element_type
+    ]
+
+
+async def render_dynamic_ui_response(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    response: str,
+    ui: Optional[dict],
+    reply_message=None,
+    user_id: Optional[int] = None,
+) -> None:
+    response = sanitize_html_for_telegram(response or "")
+    chunks = split_message(response) if response else []
+    actions_markup = _build_dynamic_actions_markup(ui or {}, chat_id, user_id)
+
+    if chunks:
+        for index, chunk in enumerate(chunks):
+            reply_markup = actions_markup if index == len(chunks) - 1 else None
+            if reply_message:
+                await send_reply_with_retry(reply_message, chunk, reply_markup=reply_markup)
+            else:
+                await send_text_with_retry(context.bot, chat_id, chunk, reply_markup=reply_markup)
+    elif actions_markup:
+        if reply_message:
+            await send_reply_with_retry(reply_message, "اختر من الأزرار:", reply_markup=actions_markup)
+        else:
+            await send_text_with_retry(context.bot, chat_id, "اختر من الأزرار:", reply_markup=actions_markup)
+
+    for quiz in _dynamic_ui_elements(ui or {}, "quiz"):
+        sent = await context.bot.send_poll(
+            chat_id=chat_id,
+            question=quiz["question"],
+            options=quiz["options"],
+            type="quiz",
+            correct_option_id=quiz["correct_index"],
+            explanation=quiz.get("explanation") or None,
+            is_anonymous=False,
+        )
+        POLL_CONTEXTS[sent.poll.id] = {
+            "goal_id": quiz.get("goal_id", "dynamic-ui"),
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "correct_index": quiz["correct_index"],
+        }
+
+    for poll in _dynamic_ui_elements(ui or {}, "poll"):
+        await context.bot.send_poll(
+            chat_id=chat_id,
+            question=poll["question"],
+            options=poll["options"],
+            type="regular",
+            allows_multiple_answers=bool(poll.get("multiple_answers")),
+            is_anonymous=False,
+        )
+
+
+async def answer_callback_safely(query, *args, **kwargs) -> bool:
+    try:
+        await query.answer(*args, **kwargs)
+        return True
+    except BadRequest as e:
+        message = str(e)
+        if "Query is too old" in message or "query id is invalid" in message:
+            logger.info("Ignoring stale callback query: %s", message)
+            return False
+        raise
+
+
 async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event) -> None:
     """Refresh Telegram's typing indicator until stop_event is set."""
     while not stop_event.is_set():
@@ -301,11 +434,15 @@ async def render_agent_result(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             return
 
-    sanitized = sanitize_html_for_telegram(result["response"])
-    chunks = split_message(sanitized)
     if update.message:
-        for chunk in chunks:
-            await send_reply_with_retry(update.message, chunk)
+        await render_dynamic_ui_response(
+            context=context,
+            chat_id=update.effective_chat.id if update.effective_chat else update.message.chat_id,
+            response=result.get("response", ""),
+            ui=ui,
+            reply_message=update.message,
+            user_id=update.effective_user.id if update.effective_user else None,
+        )
 
 
 async def send_agent_text(
@@ -357,12 +494,14 @@ async def send_agent_text(
                         )
                 return result
 
-        response = sanitize_html_for_telegram(result.get("response", ""))
-        for chunk in split_message(response):
-            if reply_message:
-                await send_reply_with_retry(reply_message, chunk)
-            else:
-                await send_text_with_retry(context.bot, chat_id, chunk)
+        await render_dynamic_ui_response(
+            context=context,
+            chat_id=chat_id,
+            response=result.get("response", ""),
+            ui=ui,
+            reply_message=reply_message,
+            user_id=user_id,
+        )
 
     return result
 
@@ -516,9 +655,33 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+    await answer_callback_safely(query)
 
     data = query.data or ""
+    if data.startswith("ui:"):
+        parts = data.split(":", 2)
+        if len(parts) != 3 or not query.message or not query.from_user:
+            return
+        _cleanup_dynamic_ui_actions()
+        token, button_id = parts[1], parts[2]
+        action_set = DYNAMIC_UI_ACTIONS.get(token)
+        action = (action_set or {}).get("actions", {}).get(button_id)
+        if not action:
+            await query.message.reply_text("انتهت صلاحية هذا الزر. اطلب مني الخيار مرة ثانية.")
+            return
+        stored_user_id = action_set.get("user_id")
+        if stored_user_id and stored_user_id != query.from_user.id:
+            await answer_callback_safely(query, "هذا الزر مخصص لمحادثة أخرى.", show_alert=True)
+            return
+        await send_agent_text(
+            user_id=query.from_user.id,
+            chat_id=query.message.chat_id,
+            context=context,
+            query_text=action["prompt"],
+            reply_message=query.message,
+        )
+        return
+
     if data == "goal:cancel":
         if query.message:
             await query.message.reply_text("تمام، ما غيرت شيئاً.")

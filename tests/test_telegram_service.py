@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from telegram.error import Forbidden
+from telegram.error import BadRequest, Forbidden
 
 from telegram_service import main as telegram_main
 from telegram_service.telegram_bot import handlers
@@ -220,6 +220,110 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         args, kwargs = update.message.reply_text.await_args
         self.assertIn("Learn Python", args[0])
         self.assertIsNotNone(kwargs["reply_markup"])
+
+    async def test_render_dynamic_actions_uses_inline_markup(self):
+        update = make_update("hello")
+        handlers.DYNAMIC_UI_ACTIONS.clear()
+        result = {
+            "status": "success",
+            "response": "اختر الخطوة التالية",
+            "ui": {
+                "version": 1,
+                "elements": [{
+                    "type": "actions",
+                    "buttons": [
+                        {"id": "more", "label": "اشرح أكثر", "prompt": "اشرح بتفصيل"},
+                        {"id": "docs", "label": "رابط", "url": "https://example.com"},
+                    ],
+                }],
+            },
+        }
+
+        await handlers.render_agent_result(update, make_context(), result)
+
+        update.message.reply_text.assert_awaited_once()
+        _, kwargs = update.message.reply_text.await_args
+        markup = kwargs["reply_markup"]
+        self.assertIsNotNone(markup)
+        first_button = markup.inline_keyboard[0][0]
+        second_button = markup.inline_keyboard[0][1]
+        self.assertTrue(first_button.callback_data.startswith("ui:"))
+        self.assertEqual(second_button.url, "https://example.com")
+        self.assertEqual(len(handlers.DYNAMIC_UI_ACTIONS), 1)
+
+    async def test_dynamic_callback_forwards_stored_prompt(self):
+        handlers.DYNAMIC_UI_ACTIONS.clear()
+        handlers.DYNAMIC_UI_ACTIONS["tok123"] = {
+            "chat_id": 456,
+            "user_id": 123,
+            "expires_at": handlers.time.monotonic() + 60,
+            "actions": {"more": {"label": "اشرح أكثر", "prompt": "اشرح بتفصيل"}},
+        }
+        update = make_callback_update("ui:tok123:more")
+
+        with patch.object(handlers, "send_agent_text", AsyncMock()) as send_agent:
+            await handlers.callback_query_handler(update, make_context())
+
+        update.callback_query.answer.assert_awaited_once()
+        send_agent.assert_awaited_once()
+        self.assertEqual(send_agent.await_args.kwargs["query_text"], "اشرح بتفصيل")
+
+    async def test_dynamic_callback_expired_context_falls_back(self):
+        handlers.DYNAMIC_UI_ACTIONS.clear()
+        update = make_callback_update("ui:missing:more")
+
+        await handlers.callback_query_handler(update, make_context())
+
+        update.callback_query.message.reply_text.assert_awaited_once()
+        args, _ = update.callback_query.message.reply_text.await_args
+        self.assertIn("انتهت صلاحية", args[0])
+
+    async def test_stale_callback_answer_does_not_crash_handler(self):
+        update = make_callback_update("ui:missing:more")
+        update.callback_query.answer.side_effect = BadRequest(
+            "Query is too old and response timeout expired or query id is invalid"
+        )
+
+        await handlers.callback_query_handler(update, make_context())
+
+        update.callback_query.message.reply_text.assert_awaited_once()
+
+    async def test_render_dynamic_quiz_and_poll_sends_native_polls(self):
+        update = make_update("quiz")
+        context = make_context()
+        handlers.POLL_CONTEXTS.clear()
+        result = {
+            "status": "success",
+            "response": "جاهز",
+            "ui": {
+                "version": 1,
+                "elements": [
+                    {
+                        "type": "quiz",
+                        "question": "What repeats code?",
+                        "options": ["Variable", "Loop"],
+                        "correct_index": 1,
+                        "explanation": "Loops repeat code.",
+                    },
+                    {
+                        "type": "poll",
+                        "question": "What next?",
+                        "options": ["Examples", "Quiz"],
+                        "multiple_answers": False,
+                    },
+                ],
+            },
+        }
+
+        await handlers.render_agent_result(update, context, result)
+
+        self.assertEqual(context.bot.send_poll.await_count, 2)
+        quiz_kwargs = context.bot.send_poll.await_args_list[0].kwargs
+        poll_kwargs = context.bot.send_poll.await_args_list[1].kwargs
+        self.assertEqual(quiz_kwargs["type"], "quiz")
+        self.assertEqual(quiz_kwargs["correct_option_id"], 1)
+        self.assertEqual(poll_kwargs["type"], "regular")
+        self.assertIn("poll-1", handlers.POLL_CONTEXTS)
 
     async def test_ask_agent_reads_ui_from_answer_metadata(self):
         post_response = Mock()

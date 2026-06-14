@@ -3,11 +3,13 @@ Main polling loop for the Bulbul agent, running entirely on the Goa event bus.
 """
 
 import asyncio
+import json
 import logging
 import os
+import re
 import sys
 import uuid
-from typing import Optional, List
+from typing import Any, Optional, List
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,6 +53,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+UI_ENVELOPE_RE = re.compile(r"\s*<bulbul_ui>(?P<json>.*?)</bulbul_ui>\s*$", re.DOTALL)
 
 # Config
 GOA_URL = os.getenv("GOA_URL", "http://195.35.0.64").rstrip("/")
@@ -270,6 +273,103 @@ def _goal_cards_ui(goals: List[dict]) -> dict:
     }
 
 
+def _short_text(value: Any, limit: int) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _validate_ui_element(element: Any) -> Optional[dict]:
+    if not isinstance(element, dict):
+        return None
+
+    element_type = element.get("type")
+    if element_type == "actions":
+        buttons = []
+        for raw_button in (element.get("buttons") or [])[:8]:
+            if not isinstance(raw_button, dict):
+                continue
+            label = _short_text(raw_button.get("label"), 64)
+            if not label:
+                continue
+            button = {
+                "id": re.sub(r"[^A-Za-z0-9_-]", "_", _short_text(raw_button.get("id") or label, 32)) or f"action_{len(buttons) + 1}",
+                "label": label,
+            }
+            url = _short_text(raw_button.get("url"), 2048)
+            prompt = _short_text(raw_button.get("prompt"), 1000)
+            if url.startswith(("http://", "https://")):
+                button["url"] = url
+            elif prompt:
+                button["prompt"] = prompt
+            else:
+                continue
+            buttons.append(button)
+        return {"type": "actions", "buttons": buttons} if buttons else None
+
+    if element_type == "quiz":
+        question = _short_text(element.get("question"), 300)
+        options = [_short_text(option, 100) for option in (element.get("options") or [])[:10]]
+        options = [option for option in options if option]
+        correct_index = element.get("correct_index")
+        if not question or len(options) < 2:
+            return None
+        if not isinstance(correct_index, int) or correct_index < 0 or correct_index >= len(options):
+            return None
+        return {
+            "type": "quiz",
+            "question": question,
+            "options": options,
+            "correct_index": correct_index,
+            "explanation": _short_text(element.get("explanation"), 200),
+        }
+
+    if element_type == "poll":
+        question = _short_text(element.get("question"), 300)
+        options = [_short_text(option, 100) for option in (element.get("options") or [])[:10]]
+        options = [option for option in options if option]
+        if not question or len(options) < 2:
+            return None
+        return {
+            "type": "poll",
+            "question": question,
+            "options": options,
+            "multiple_answers": bool(element.get("multiple_answers")),
+        }
+
+    return None
+
+
+def _validate_dynamic_ui(data: Any) -> Optional[dict]:
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return None
+
+    elements = []
+    for element in (data.get("elements") or [])[:5]:
+        validated = _validate_ui_element(element)
+        if validated:
+            elements.append(validated)
+
+    return {"version": 1, "elements": elements} if elements else None
+
+
+def extract_dynamic_ui(text: str) -> tuple[str, Optional[dict]]:
+    """Strip a final Bulbul UI envelope and return validated Goa UI metadata."""
+    match = UI_ENVELOPE_RE.search(text or "")
+    if not match:
+        return text, None
+
+    visible_text = (text or "")[:match.start()].rstrip()
+    try:
+        data = json.loads(match.group("json").strip())
+    except json.JSONDecodeError as e:
+        logger.warning("Invalid bulbul_ui JSON envelope: %s", e)
+        return visible_text, None
+
+    ui = _validate_dynamic_ui(data)
+    if not ui:
+        logger.warning("Rejected empty or invalid bulbul_ui envelope")
+    return visible_text, ui
+
+
 async def process_question(task_id: str, question_event_id: str, goa_events: List[dict]):
     """Processes a pending question via ADK."""
     
@@ -429,7 +529,8 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
         final_response = "عذراً، حدث خطأ أثناء التفكير في إجابة."
 
     # Post Answer
-    await post_answer(task_id, question_event_id, final_response)
+    final_response, dynamic_ui = extract_dynamic_ui(final_response)
+    await post_answer(task_id, question_event_id, final_response, ui=dynamic_ui)
 
 
 async def post_answer(task_id: str, question_id: str, text: str, ui: Optional[dict] = None):

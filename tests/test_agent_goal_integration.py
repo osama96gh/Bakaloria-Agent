@@ -44,6 +44,23 @@ class FakeRunner:
         yield event
 
 
+class DynamicUIRunner:
+    def __init__(self, *args, **kwargs):
+        self.session_service = kwargs["session_service"]
+
+    async def run_async(self, **kwargs):
+        event = SimpleNamespace(
+            content=SimpleNamespace(
+                parts=[SimpleNamespace(
+                    text='جواب\n\n<bulbul_ui>{"version":1,"elements":[{"type":"actions","buttons":[{"id":"more","label":"اشرح أكثر","prompt":"اشرح بتفصيل"}]}]}</bulbul_ui>',
+                    thought=False,
+                )]
+            ),
+            is_final_response=lambda: True,
+        )
+        yield event
+
+
 class AgentGoalIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_goals_command_posts_goal_cards_ui_payload(self):
         question = {
@@ -92,6 +109,59 @@ class AgentGoalIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls[0]["content"], {"text": "hello"})
         self.assertEqual(calls[0]["metadata"], {"ui": {"type": "goal_cards", "goals": []}})
+
+    def test_extract_dynamic_ui_strips_valid_envelope(self):
+        text, ui = agent_main.extract_dynamic_ui(
+            'مرحبا\n\n<bulbul_ui>{"version":1,"elements":[{"type":"quiz","question":"Q?","options":["A","B"],"correct_index":1,"explanation":"B"}]}</bulbul_ui>'
+        )
+
+        self.assertEqual(text, "مرحبا")
+        self.assertEqual(ui["version"], 1)
+        self.assertEqual(ui["elements"][0]["type"], "quiz")
+        self.assertEqual(ui["elements"][0]["correct_index"], 1)
+
+    def test_extract_dynamic_ui_strips_invalid_json_and_falls_back_to_text(self):
+        text, ui = agent_main.extract_dynamic_ui("مرئي\n<bulbul_ui>{bad json}</bulbul_ui>")
+
+        self.assertEqual(text, "مرئي")
+        self.assertIsNone(ui)
+
+    def test_extract_dynamic_ui_trims_invalid_fields(self):
+        text, ui = agent_main.extract_dynamic_ui(
+            'مرئي<bulbul_ui>{"version":1,"elements":[{"type":"quiz","question":"Q?","options":["A","B"],"correct_index":4},{"type":"actions","buttons":[{"id":"bad","label":"Bad"}]}]}</bulbul_ui>'
+        )
+
+        self.assertEqual(text, "مرئي")
+        self.assertIsNone(ui)
+
+    async def test_process_question_posts_clean_text_and_dynamic_ui_payload(self):
+        question = {
+            "id": "q1",
+            "event_type": "question",
+            "content": {"text": "اشرح loops"},
+        }
+        agent_main._persona_service.get_persona = AsyncMock(return_value={})
+        agent_main._memory_service.get_memories = AsyncMock(return_value=[])
+        agent_main._goal_service.get_goals = AsyncMock(return_value=[])
+        posted_payloads = []
+
+        async def fake_goa_request(method, path, **kwargs):
+            if method == "GET" and path == "/tasks/task-1":
+                return JsonResponse({"task": {"external_ref": "telegram_123"}})
+            if method == "POST" and path == "/tasks/task-1/events":
+                posted_payloads.append(kwargs["json"])
+                return JsonResponse(status_code=201)
+            raise AssertionError(f"Unexpected Goa request: {method} {path}")
+
+        with (
+            patch.object(agent_main, "_goa_request", AsyncMock(side_effect=fake_goa_request)),
+            patch.object(agent_main, "Runner", DynamicUIRunner),
+        ):
+            await agent_main.process_question("task-1", "q1", [question])
+
+        self.assertEqual(posted_payloads[0]["content"], {"text": "جواب"})
+        self.assertEqual(posted_payloads[0]["metadata"]["ui"]["version"], 1)
+        self.assertEqual(posted_payloads[0]["metadata"]["ui"]["elements"][0]["type"], "actions")
 
     async def test_post_progress_uses_progress_event_type(self):
         calls = []
@@ -177,6 +247,12 @@ class AgentGoalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[goal-01] Learn Python (active)", formatted)
         self.assertIn("Finished variables", formatted)
         self.assertIn("practice loops", formatted)
+
+    def test_instruction_requires_progress_for_non_trivial_work(self):
+        instruction = agent_main._prompt_file.read_text(encoding="utf-8")
+
+        self.assertIn("استخدمها مبكراً في أي طلب غير بسيط", instruction)
+        self.assertIn("وليست عامة مثل \"استلمت رسالتك\"", instruction)
 
 
 if __name__ == "__main__":
