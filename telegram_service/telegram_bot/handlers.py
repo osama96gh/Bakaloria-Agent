@@ -383,6 +383,21 @@ async def answer_callback_safely(query, *args, **kwargs) -> bool:
         raise
 
 
+async def clear_callback_markup_safely(query) -> None:
+    message = getattr(query, "message", None)
+    edit_reply_markup = getattr(message, "edit_reply_markup", None)
+    if not edit_reply_markup:
+        return
+    try:
+        await edit_reply_markup(reply_markup=None)
+    except BadRequest as e:
+        message = str(e)
+        if "Message is not modified" in message or "message to edit not found" in message:
+            logger.debug("Ignoring callback markup clear failure: %s", message)
+            return
+        logger.info("Could not clear callback markup: %s", message)
+
+
 async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event) -> None:
     """Refresh Telegram's typing indicator until stop_event is set."""
     while not stop_event.is_set():
@@ -655,7 +670,6 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     if not query:
         return
-    await answer_callback_safely(query)
 
     data = query.data or ""
     if data.startswith("ui:"):
@@ -667,12 +681,20 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         action_set = DYNAMIC_UI_ACTIONS.get(token)
         action = (action_set or {}).get("actions", {}).get(button_id)
         if not action:
+            await answer_callback_safely(query, "هذا الزر انتهت صلاحيته.")
             await query.message.reply_text("انتهت صلاحية هذا الزر. اطلب مني الخيار مرة ثانية.")
             return
         stored_user_id = action_set.get("user_id")
         if stored_user_id and stored_user_id != query.from_user.id:
             await answer_callback_safely(query, "هذا الزر مخصص لمحادثة أخرى.", show_alert=True)
             return
+        consumed = action_set.setdefault("consumed", set())
+        if button_id in consumed:
+            await answer_callback_safely(query, "تم استلامه بالفعل، بلبل يعمل عليه الآن.")
+            return
+        consumed.add(button_id)
+        await answer_callback_safely(query, "تم استلام طلبك، بلبل يعمل عليه الآن.")
+        await clear_callback_markup_safely(query)
         await send_agent_text(
             user_id=query.from_user.id,
             chat_id=query.message.chat_id,
@@ -683,15 +705,17 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if data == "goal:cancel":
+        await answer_callback_safely(query, "تمام.")
         if query.message:
             await query.message.reply_text("تمام، ما غيرت شيئاً.")
         return
 
     if data.startswith("settings:"):
         if data == "settings:output:voice_disabled":
-            await query.answer("الردود الصوتية قادمة لاحقاً، لكنها غير مفعلة حالياً.", show_alert=True)
+            await answer_callback_safely(query, "الردود الصوتية قادمة لاحقاً، لكنها غير مفعلة حالياً.", show_alert=True)
             return
         if query.message and query.from_user:
+            await answer_callback_safely(query, "تم، أعمل على التحديث.")
             await send_agent_text(
                 user_id=query.from_user.id,
                 chat_id=query.message.chat_id,
@@ -703,9 +727,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data.startswith("outreach:"):
         if data == "outreach:later":
-            await query.answer("تمام، نكمل لاحقاً.")
+            await answer_callback_safely(query, "تمام، نكمل لاحقاً.")
             return
         if data == "outreach:goals" and query.message and query.from_user:
+            await answer_callback_safely(query, "تمام، أجهز أهدافك.")
             await send_agent_text(
                 user_id=query.from_user.id,
                 chat_id=query.message.chat_id,
@@ -718,6 +743,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             parts = data.split(":")
             goal_id = parts[2] if len(parts) > 2 else ""
             prompt = _synthetic_goal_prompt("continue", goal_id) if goal_id else "تابع معي آخر هدف نشط واقترح خطوة صغيرة الآن."
+            await answer_callback_safely(query, "تم استلام طلبك، بلبل يعمل عليه الآن.")
             await send_agent_text(
                 user_id=query.from_user.id,
                 chat_id=query.message.chat_id,
@@ -736,15 +762,18 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     action, goal_id = parts[1], parts[2]
 
     if action == "pause":
+        await answer_callback_safely(query, "تمام.")
         await query.message.reply_text(
             "هل تريد إيقاف هذا الهدف مؤقتاً؟",
             reply_markup=build_pause_confirm_markup(goal_id),
         )
         return
     if action == "quiz":
+        await answer_callback_safely(query, "وصلني، أجهز الاختبار الآن.")
         await _send_goal_quiz(update, context, goal_id)
         return
 
+    await answer_callback_safely(query, "تم استلام طلبك، بلبل يعمل عليه الآن.")
     await send_agent_text(
         user_id=query.from_user.id,
         chat_id=query.message.chat_id,

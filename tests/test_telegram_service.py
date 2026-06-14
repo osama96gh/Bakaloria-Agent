@@ -267,6 +267,26 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         update.callback_query.answer.assert_awaited_once()
         send_agent.assert_awaited_once()
         self.assertEqual(send_agent.await_args.kwargs["query_text"], "اشرح بتفصيل")
+        self.assertIn("more", handlers.DYNAMIC_UI_ACTIONS["tok123"]["consumed"])
+
+    async def test_dynamic_callback_duplicate_click_does_not_forward_again(self):
+        handlers.DYNAMIC_UI_ACTIONS.clear()
+        handlers.DYNAMIC_UI_ACTIONS["tok123"] = {
+            "chat_id": 456,
+            "user_id": 123,
+            "expires_at": handlers.time.monotonic() + 60,
+            "actions": {"more": {"label": "اشرح أكثر", "prompt": "اشرح بتفصيل"}},
+            "consumed": {"more"},
+        }
+        update = make_callback_update("ui:tok123:more")
+
+        with patch.object(handlers, "send_agent_text", AsyncMock()) as send_agent:
+            await handlers.callback_query_handler(update, make_context())
+
+        update.callback_query.answer.assert_awaited_once()
+        args, _ = update.callback_query.answer.await_args
+        self.assertIn("تم استلامه بالفعل", args[0])
+        send_agent.assert_not_awaited()
 
     async def test_dynamic_callback_expired_context_falls_back(self):
         handlers.DYNAMIC_UI_ACTIONS.clear()
