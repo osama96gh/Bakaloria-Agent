@@ -40,6 +40,7 @@ from bulbul_agent.core.goal_service import GoalService
 from bulbul_agent.core.tools.persona_tool import init_persona_tool, update_persona
 from bulbul_agent.core.tools.memory_tool import init_memory_tool, manage_memory
 from bulbul_agent.core.tools.goal_tool import init_goal_tool, manage_goal
+from bulbul_agent.core.tools.progress_tool import init_progress_tool, send_progress
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 OUTREACH_PARENT_CONTEXT_EVENTS = int(os.getenv("OUTREACH_PARENT_CONTEXT_EVENTS", "30"))
@@ -90,6 +91,7 @@ _agent = Agent(
         update_persona,
         manage_memory,
         manage_goal,
+        send_progress,
         AgentTool(agent=_search_agent),
         AgentTool(agent=_code_agent),
     ],
@@ -331,6 +333,11 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
     init_memory_tool(_memory_service, user_id)
     init_goal_tool(_goal_service, user_id)
 
+    async def progress_sender(text: str) -> None:
+        await post_progress(task_id, question_event_id, text)
+
+    init_progress_tool(progress_sender)
+
     initial_state = dict(persona)
     initial_state["current_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     initial_state["user_memories"] = "\n".join(f"- [{m['fact_id']}] {m['fact']}" for m in memories) if memories else "لا توجد ذكريات محفوظة بعد"
@@ -428,22 +435,38 @@ async def process_question(task_id: str, question_event_id: str, goa_events: Lis
 async def post_answer(task_id: str, question_id: str, text: str, ui: Optional[dict] = None):
     """Posts an answer event to Goa."""
     payload = {
-        "answering": [question_id]
-    }
-    if ui:
-        payload["ui"] = ui
-
-    payload = {
         "event_type": "answer",
         "content": {"text": text},
         "in_reply_to": question_id,
-        "payload": payload,
+        "payload": {
+            "answering": [question_id]
+        },
     }
+    if ui:
+        payload["metadata"] = {"ui": ui}
+
     resp = await _goa_request("POST", f"/tasks/{task_id}/events", json=payload)
     if resp.status_code == 201:
         logger.info(f"Answer posted for question {question_id}")
     else:
         logger.error(f"Failed to post answer: {resp.text}")
+
+
+async def post_progress(task_id: str, question_id: str, text: str):
+    """Posts a user-visible progress event to Goa."""
+    payload = {
+        "event_type": "progress",
+        "content": {"text": text},
+        "in_reply_to": question_id,
+        "payload": {
+            "answering": [question_id]
+        },
+    }
+    resp = await _goa_request("POST", f"/tasks/{task_id}/events", json=payload)
+    if resp.status_code == 201:
+        logger.info(f"Progress posted for question {question_id}")
+    else:
+        logger.error(f"Failed to post progress: {resp.text}")
 
 
 async def main_loop():

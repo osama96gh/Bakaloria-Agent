@@ -15,20 +15,24 @@ from .base import STTProvider, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_GEMINI_STT_MODEL = "gemini-flash-latest"
+GEMINI_STT_MODEL_ENV = "GEMINI_TRANSCRIPTION_MODEL"
+
 
 class GeminiSTTProvider(STTProvider):
     """Gemini API provider for speech-to-text using native audio understanding."""
 
-    def __init__(self, api_key: str | None = None, model: str = "gemini-2.0-flash"):
+    def __init__(self, api_key: str | None = None, model: str | None = None):
         """
         Initialize the Gemini STT provider.
 
         Args:
             api_key: Gemini API key. If not provided, uses GEMINI_API_KEY env var.
-            model: Gemini model to use (default: gemini-2.0-flash).
+            model: Gemini model to use. If not provided, uses
+                GEMINI_TRANSCRIPTION_MODEL or Google's latest Flash alias.
         """
         self._api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self._model = model
+        self._model = model or os.getenv(GEMINI_STT_MODEL_ENV, DEFAULT_GEMINI_STT_MODEL)
         self._client: genai.Client | None = None
 
     @property

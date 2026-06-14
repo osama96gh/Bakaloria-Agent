@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import unittest
@@ -193,7 +194,8 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
             await handlers.settings_command(update, make_context())
 
         update.message.reply_text.assert_awaited_once()
-        _, kwargs = update.message.reply_text.await_args
+        args, kwargs = update.message.reply_text.await_args
+        self.assertIn("الإعدادات", args[0])
         self.assertIsNotNone(kwargs["reply_markup"])
 
     async def test_render_goal_cards_uses_inline_markup(self):
@@ -218,6 +220,163 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         args, kwargs = update.message.reply_text.await_args
         self.assertIn("Learn Python", args[0])
         self.assertIsNotNone(kwargs["reply_markup"])
+
+    async def test_ask_agent_reads_ui_from_answer_metadata(self):
+        post_response = Mock()
+        post_response.json.return_value = {"event": {"id": "q1"}}
+        post_response.raise_for_status.return_value = None
+        task_response = Mock()
+        task_response.status_code = 200
+        task_response.json.return_value = {
+            "events": [{
+                "event_type": "answer",
+                "in_reply_to": "q1",
+                "content": {
+                    "text": "goals",
+                },
+                "metadata": {"ui": {"type": "goal_cards", "goals": []}},
+            }]
+        }
+
+        with patch.object(
+            handlers,
+            "_goa_request",
+            AsyncMock(side_effect=[post_response, task_response]),
+        ):
+            result = await handlers.ask_agent_via_goa("task-1", "/goals")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["ui"], {"type": "goal_cards", "goals": []})
+
+    async def test_ask_agent_does_not_send_fixed_progress_while_polling(self):
+        post_response = Mock()
+        post_response.json.return_value = {"event": {"id": "q1"}}
+        post_response.raise_for_status.return_value = None
+        pending_response = Mock()
+        pending_response.status_code = 200
+        pending_response.json.return_value = {"events": []}
+        answer_response = Mock()
+        answer_response.status_code = 200
+        answer_response.json.return_value = {
+            "events": [{
+                "event_type": "answer",
+                "in_reply_to": "q1",
+                "content": {"text": "done"},
+            }]
+        }
+        progress = AsyncMock()
+
+        with (
+            patch.object(handlers.asyncio, "sleep", AsyncMock()),
+            patch.object(
+                handlers,
+                "_goa_request",
+                AsyncMock(side_effect=[post_response, pending_response, answer_response]),
+            ),
+        ):
+            result = await handlers.ask_agent_via_goa(
+                "task-1",
+                "slow question",
+                progress_callback=progress,
+            )
+
+        self.assertEqual(result["status"], "success")
+        progress.assert_not_awaited()
+
+    async def test_ask_agent_forwards_agent_progress_events(self):
+        post_response = Mock()
+        post_response.json.return_value = {"event": {"id": "q1"}}
+        post_response.raise_for_status.return_value = None
+        progress_response = Mock()
+        progress_response.status_code = 200
+        progress_response.json.return_value = {
+            "events": [{
+                "id": "p1",
+                "event_type": "progress",
+                "in_reply_to": "q1",
+                "content": {"text": "أراجع أهدافك الآن."},
+            }]
+        }
+        answer_response = Mock()
+        answer_response.status_code = 200
+        answer_response.json.return_value = {
+            "events": [
+                {
+                    "id": "p1",
+                    "event_type": "progress",
+                    "in_reply_to": "q1",
+                    "content": {"text": "أراجع أهدافك الآن."},
+                },
+                {
+                    "event_type": "answer",
+                    "in_reply_to": "q1",
+                    "content": {"text": "done"},
+                },
+            ]
+        }
+        progress = AsyncMock()
+
+        with (
+            patch.object(handlers.asyncio, "sleep", AsyncMock()),
+            patch.object(
+                handlers,
+                "_goa_request",
+                AsyncMock(side_effect=[post_response, progress_response, answer_response]),
+            ),
+        ):
+            result = await handlers.ask_agent_via_goa(
+                "task-1",
+                "slow question",
+                progress_callback=progress,
+            )
+
+        self.assertEqual(result["status"], "success")
+        progress.assert_awaited_once_with("أراجع أهدافك الآن.")
+
+    async def test_keep_typing_refreshes_until_stopped(self):
+        bot = SimpleNamespace(send_chat_action=AsyncMock())
+        stop_event = asyncio.Event()
+
+        with patch.object(handlers, "TYPING_REFRESH_SECONDS", 0.01):
+            typing_task = asyncio.create_task(
+                handlers.keep_typing(bot, 456, stop_event)
+            )
+            await asyncio.sleep(0.025)
+            stop_event.set()
+            await asyncio.wait_for(typing_task, timeout=1)
+
+        self.assertGreaterEqual(bot.send_chat_action.await_count, 2)
+        bot.send_chat_action.assert_awaited_with(
+            chat_id=456,
+            action=handlers.ChatAction.TYPING,
+        )
+
+    async def test_send_agent_text_renders_progress_before_final_response(self):
+        context = make_context()
+        reply_message = SimpleNamespace(reply_text=AsyncMock())
+
+        async def fake_ask_agent(*args, progress_callback=None, **kwargs):
+            await progress_callback("أراجع التفاصيل الآن.")
+            return {"status": "success", "response": "الجواب النهائي"}
+
+        with (
+            patch.object(handlers, "get_or_create_goa_task", AsyncMock(return_value="task-1")),
+            patch.object(handlers, "ask_agent_via_goa", fake_ask_agent),
+        ):
+            await handlers.send_agent_text(
+                user_id=123,
+                chat_id=456,
+                context=context,
+                query_text="hello",
+                reply_message=reply_message,
+            )
+
+        self.assertEqual(reply_message.reply_text.await_count, 2)
+        first_args, first_kwargs = reply_message.reply_text.await_args_list[0]
+        second_args, _ = reply_message.reply_text.await_args_list[1]
+        self.assertIn("أراجع التفاصيل", first_args[0])
+        self.assertIsNone(first_kwargs["parse_mode"])
+        self.assertEqual(second_args[0], "الجواب النهائي")
 
     async def test_callback_goal_continue_forwards_synthetic_prompt(self):
         update = make_callback_update("goal:continue:goal-01")

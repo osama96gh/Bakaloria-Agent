@@ -5,8 +5,7 @@ Telegram bot handlers for messages and commands, acting purely as a delivery hub
 import asyncio
 import json
 import logging
-import time
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 import httpx
 
 from telegram import Update
@@ -34,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 MAX_SEND_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.0
+TYPING_REFRESH_SECONDS = 4.0
 POLL_CONTEXTS: Dict[str, Dict[str, Any]] = {}
 
 
@@ -109,7 +109,13 @@ def record_user_engagement(update: Update) -> None:
     )
 
 
-async def ask_agent_via_goa(task_id: str, text: str, image_bytes: Optional[bytes] = None, image_mime: str = "") -> dict:
+async def ask_agent_via_goa(
+    task_id: str,
+    text: str,
+    image_bytes: Optional[bytes] = None,
+    image_mime: str = "",
+    progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> dict:
     """Sends a QuestionEvent to Goa and polls for the AnswerEvent."""
     try:
         attachments = []
@@ -142,6 +148,7 @@ async def ask_agent_via_goa(task_id: str, text: str, image_bytes: Optional[bytes
         
         # 2. Poll for the Answer
         max_polls = 120  # 1 minute max (poll every 0.5s)
+        seen_progress_event_ids = set()
         for _ in range(max_polls):
             await asyncio.sleep(0.5)
             events_resp = await _goa_request("GET", f"/tasks/{task_id}")
@@ -150,12 +157,23 @@ async def ask_agent_via_goa(task_id: str, text: str, image_bytes: Optional[bytes
                 
             events = events_resp.json().get("events", [])
             for ev in events:
+                if (
+                    progress_callback
+                    and ev.get("event_type") == "progress"
+                    and ev.get("in_reply_to") == question_id
+                    and ev.get("id") not in seen_progress_event_ids
+                ):
+                    progress_text = ev.get("content", {}).get("text", "").strip()
+                    seen_progress_event_ids.add(ev.get("id"))
+                    if progress_text:
+                        await progress_callback(progress_text)
+
                 if ev.get("event_type") == "answer" and ev.get("in_reply_to") == question_id:
                     answer_text = ev.get("content", {}).get("text", "")
                     return {
                         "status": "success",
                         "response": answer_text,
-                        "ui": ev.get("payload", {}).get("ui"),
+                        "ui": ev.get("metadata", {}).get("ui"),
                     }
                     
         return {"status": "error", "error": "Timeout waiting for agent response"}
@@ -232,6 +250,39 @@ async def send_text_with_retry(
     return False
 
 
+async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event) -> None:
+    """Refresh Telegram's typing indicator until stop_event is set."""
+    while not stop_event.is_set():
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception as e:
+            logger.debug("Failed to refresh typing indicator: %s", e)
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=TYPING_REFRESH_SECONDS)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def send_progress_update(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+    reply_message=None,
+) -> None:
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except Exception as e:
+        logger.debug("Failed to send progress chat action: %s", e)
+
+    progress_text = f"⏳ {text}"
+    if reply_message:
+        await send_reply_with_retry(reply_message, progress_text, parse_mode=None)
+    else:
+        await send_text_with_retry(context.bot, chat_id, progress_text, parse_mode=None)
+
+
 async def render_agent_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
     if result["status"] != "success":
         if update.message:
@@ -266,9 +317,23 @@ async def send_agent_text(
     reply_message=None,
     render_response: bool = True,
 ) -> dict:
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    task_id = await get_or_create_goa_task(user_id)
-    result = await ask_agent_via_goa(task_id, query_text)
+    typing_stop = asyncio.Event()
+    typing_task = asyncio.create_task(keep_typing(context.bot, chat_id, typing_stop))
+    try:
+        task_id = await get_or_create_goa_task(user_id)
+        result = await ask_agent_via_goa(
+            task_id,
+            query_text,
+            progress_callback=lambda message: send_progress_update(
+                context=context,
+                chat_id=chat_id,
+                text=message,
+                reply_message=reply_message,
+            ),
+        )
+    finally:
+        typing_stop.set()
+        await typing_task
 
     if render_response:
         ui = result.get("ui") or {}
@@ -322,11 +387,29 @@ async def forward_to_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, q
         
     user_id = update.effective_user.id
     
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-
     try:
-        task_id = await get_or_create_goa_task(user_id)
-        result = await ask_agent_via_goa(task_id, query_text, photo_bytes, mime_type)
+        typing_stop = asyncio.Event()
+        typing_task = asyncio.create_task(
+            keep_typing(context.bot, update.effective_chat.id, typing_stop)
+        )
+        try:
+            task_id = await get_or_create_goa_task(user_id)
+            result = await ask_agent_via_goa(
+                task_id,
+                query_text,
+                photo_bytes,
+                mime_type,
+                progress_callback=lambda message: send_progress_update(
+                    context=context,
+                    chat_id=update.effective_chat.id,
+                    text=message,
+                    reply_message=update.message,
+                ),
+            )
+        finally:
+            typing_stop.set()
+            await typing_task
+
         await render_agent_result(update, context, result)
     except Exception as e:
         logger.exception(f"Error handling message: {e}")
@@ -335,12 +418,28 @@ async def forward_to_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, q
 
 def _synthetic_goal_prompt(action: str, goal_id: str) -> str:
     prompts = {
-        "continue": f"تابع معي الهدف {goal_id}. أعطني الخطوة التالية بشكل مختصر وعملي.",
-        "done": f"اعتبر أنني أنجزت الخطوة الحالية في الهدف {goal_id}. حدّث التقدم واقترح الخطوة التالية.",
-        "pause_confirm": f"أريد إيقاف الهدف {goal_id} مؤقتاً. حدّث حالة الهدف بعد موافقتي.",
-        "details": f"اعرض تفاصيل الهدف {goal_id}: الحالة، التقدم، الخطوات المكتملة، الخطوة الحالية، والخطوة التالية.",
+        "continue": (
+            f"تابع معي الهدف {goal_id}. رد كمدرب شخصي بالعربية: "
+            "ابدأ بجملة حماسية قصيرة، ثم أعطني خطوة واحدة عملية الآن، ثم سؤال متابعة واحد. "
+            "استخدم HTML وإيموجي مناسب، ولا تطل."
+        ),
+        "done": (
+            f"اعتبر أنني أنجزت الخطوة الحالية في الهدف {goal_id}. "
+            "حدّث التقدم، واحتفل بالإنجاز بجملة محددة، ثم اقترح الخطوة التالية. "
+            "استخدم HTML وإيموجي مناسب."
+        ),
+        "pause_confirm": (
+            f"أريد إيقاف الهدف {goal_id} مؤقتاً. حدّث حالة الهدف بعد موافقتي، "
+            "ورد بلطف واذكر أنه يمكنني الرجوع له لاحقاً."
+        ),
+        "details": (
+            f"اعرض تفاصيل الهدف {goal_id} كبطاقة جميلة بالعربية، وليس كبيانات خام. "
+            "استخدم هذا الشكل تقريباً: عنوان قوي، حالة مترجمة، شريط تقدم نصي من 10 خانات، "
+            "ملخص التقدم، الخطوة الحالية، الخطوة التالية، واقتراح واحد ذكي. "
+            "استخدم HTML وإيموجيز قليلة. لا تستخدم كلمات إنجليزية مثل Proposed أو Status."
+        ),
     }
-    return prompts.get(action, f"تابع الهدف {goal_id}.")
+    return prompts.get(action, f"تابع الهدف {goal_id} برد عربي مختصر وجذاب.")
 
 
 def _parse_quiz_response(text: str) -> Optional[dict]:
@@ -427,7 +526,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data.startswith("settings:"):
         if data == "settings:output:voice_disabled":
-            await query.answer("Voice replies are planned but disabled for now.", show_alert=True)
+            await query.answer("الردود الصوتية قادمة لاحقاً، لكنها غير مفعلة حالياً.", show_alert=True)
             return
         if query.message and query.from_user:
             await send_agent_text(
@@ -441,7 +540,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if data.startswith("outreach:"):
         if data == "outreach:later":
-            await query.answer("No problem. I’ll check in later.")
+            await query.answer("تمام، نكمل لاحقاً.")
             return
         if data == "outreach:goals" and query.message and query.from_user:
             await send_agent_text(
@@ -541,7 +640,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         record_user_engagement(update)
         await send_reply_with_retry(
             update.message,
-            "<b>Settings</b>\nChoose how you want Bulbul to respond.\n\nVoice replies are planned but disabled until a TTS provider is configured.",
+            "<b>الإعدادات</b>\nاختر كيف تحب تكون ردود بلبل.\n\nالردود الصوتية قادمة لاحقاً، لكنها غير مفعلة حتى نربط مزود تحويل النص إلى صوت.",
             reply_markup=build_settings_markup(),
         )
 

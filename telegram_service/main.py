@@ -53,12 +53,12 @@ logger = logging.getLogger(__name__)
 
 
 BOT_COMMANDS = [
-    BotCommand("start", "Start Bulbul"),
-    BotCommand("help", "Show help"),
-    BotCommand("goals", "Show goals and progress"),
-    BotCommand("settings", "Change response preferences"),
-    BotCommand("new", "Start a fresh conversation"),
-    BotCommand("reset_persona", "Reset Bulbul persona"),
+    BotCommand("start", "بدء استخدام بلبل"),
+    BotCommand("help", "عرض المساعدة"),
+    BotCommand("goals", "عرض الأهداف والتقدم"),
+    BotCommand("settings", "تعديل تفضيلات الردود"),
+    BotCommand("new", "بدء محادثة جديدة"),
+    BotCommand("reset_persona", "إعادة تعيين شخصية بلبل"),
 ]
 ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "poll_answer"]
 

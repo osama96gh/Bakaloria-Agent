@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bulbul_agent import main as agent_main
-from bulbul_agent.core.tools import goal_tool
+from bulbul_agent.core.tools import goal_tool, progress_tool
 
 
 class JsonResponse:
@@ -72,8 +72,50 @@ class AgentGoalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(agent_main, "_goa_request", AsyncMock(side_effect=fake_goa_request)):
             await agent_main.process_question("task-1", "q1", [question])
 
-        self.assertEqual(posted_payloads[0]["payload"]["ui"]["type"], "goal_cards")
-        self.assertEqual(posted_payloads[0]["payload"]["ui"]["goals"][0]["goal_id"], "goal-01")
+        self.assertEqual(posted_payloads[0]["metadata"]["ui"]["type"], "goal_cards")
+        self.assertEqual(posted_payloads[0]["metadata"]["ui"]["goals"][0]["goal_id"], "goal-01")
+
+    async def test_post_answer_uses_top_level_metadata_for_ui(self):
+        calls = []
+
+        async def fake_goa_request(method, path, **kwargs):
+            calls.append(kwargs["json"])
+            return JsonResponse(status_code=201)
+
+        with patch.object(agent_main, "_goa_request", AsyncMock(side_effect=fake_goa_request)):
+            await agent_main.post_answer(
+                "task-1",
+                "q1",
+                "hello",
+                ui={"type": "goal_cards", "goals": []},
+            )
+
+        self.assertEqual(calls[0]["content"], {"text": "hello"})
+        self.assertEqual(calls[0]["metadata"], {"ui": {"type": "goal_cards", "goals": []}})
+
+    async def test_post_progress_uses_progress_event_type(self):
+        calls = []
+
+        async def fake_goa_request(method, path, **kwargs):
+            calls.append(kwargs["json"])
+            return JsonResponse(status_code=201)
+
+        with patch.object(agent_main, "_goa_request", AsyncMock(side_effect=fake_goa_request)):
+            await agent_main.post_progress("task-1", "q1", "أراجع أهدافك الآن.")
+
+        self.assertEqual(calls[0]["event_type"], "progress")
+        self.assertEqual(calls[0]["content"], {"text": "أراجع أهدافك الآن."})
+        self.assertEqual(calls[0]["in_reply_to"], "q1")
+        self.assertEqual(calls[0]["payload"], {"answering": ["q1"]})
+
+    async def test_progress_tool_sends_current_turn_message(self):
+        sender = AsyncMock()
+        progress_tool.init_progress_tool(sender)
+
+        result = await progress_tool.send_progress("أبحث عن المعلومة الآن.")
+
+        self.assertEqual(result["status"], "success")
+        sender.assert_awaited_once_with("أبحث عن المعلومة الآن.")
 
     async def test_process_question_loads_goals_into_state_and_initializes_tool(self):
         question = {
@@ -116,6 +158,7 @@ class AgentGoalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(goal_tool._goal_service, agent_main._goal_service)
         self.assertEqual(goal_tool._current_user_id, "123")
+        self.assertIsNotNone(progress_tool._progress_sender)
 
     def test_format_goals_for_state_includes_progress_fields(self):
         formatted = agent_main._format_goals_for_state([
