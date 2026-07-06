@@ -1,18 +1,4 @@
-# Copyright 2025
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Goal Service - Manages user goals and progress using Goa memory."""
+"""Goal Service - manages user goals in Supabase ADK session state."""
 
 from __future__ import annotations
 
@@ -21,7 +7,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
-import httpx
+from supabase import Client, create_client
 
 logger = logging.getLogger(__name__)
 
@@ -29,51 +15,31 @@ SUPPORTED_GOAL_STATUSES = {"proposed", "active", "paused", "completed", "archive
 
 
 class GoalService:
-    """
-    Service for managing user goals and progress.
-
-    Stores goals in Goa's participant-owned memory API under keys:
-    user:{user_id}:goal:{goal_id}.
-    """
+    """Service for managing user goals and progress."""
 
     def __init__(
         self,
-        goa_url: Optional[str] = None,
-        goa_api_key: Optional[str] = None,
+        supabase_url: Optional[str] = None,
+        supabase_key: Optional[str] = None,
+        client: Optional[Client] = None,
+        app_name: str = "educational_assistant",
         **_: Any,
-    ):
-        self._goa_url = (goa_url or os.getenv("GOA_URL") or "http://195.35.0.64").rstrip("/")
-        self._goa_api_key = (
-            goa_api_key
-            or os.getenv("GOA_AGENT_API_KEY")
-            or os.getenv("GOA_API_KEY")
+    ) -> None:
+        self._client = client or create_client(
+            supabase_url or self._required_env("SUPABASE_URL"),
+            supabase_key or self._required_env("SUPABASE_SERVICE_KEY"),
         )
+        self._app_name = app_name
+        logger.info("GoalService initialized with Supabase adk_sessions")
 
-        if not self._goa_api_key:
-            raise RuntimeError(
-                "GoalService requires GOA_AGENT_API_KEY or GOA_API_KEY environment variable"
-            )
+    def _required_env(self, name: str) -> str:
+        value = os.getenv(name)
+        if not value:
+            raise RuntimeError(f"GoalService requires {name} environment variable")
+        return value
 
-        logger.info("GoalService initialized with Goa memory")
-
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._goa_api_key}",
-            "Content-Type": "application/json",
-        }
-
-    def _goal_key(self, user_id: str, goal_id: str) -> str:
-        return f"user:{user_id}:goal:{goal_id}"
-
-    def _goal_prefix(self, user_id: str) -> str:
-        return f"user:{user_id}:goal:"
-
-    def _goal_tags(self, user_id: str, goal_id: str, status: str) -> list[str]:
-        tags = ["bulbul", "goal", f"goal:{goal_id}", f"status:{status}"]
-        user_tag = f"user:{user_id}"
-        if len(user_tag) <= 64:
-            tags.append(user_tag)
-        return tags
+    def _session_id(self, user_id: str) -> str:
+        return f"bulbul:user:{user_id}:goals"
 
     def _goal_number(self, goal_id: str) -> int:
         try:
@@ -91,58 +57,20 @@ class GoalService:
             return value
         return [value]
 
-    def _goal_value(
-        self,
-        user_id: str,
-        goal_id: str,
-        goal: Dict[str, Any],
-    ) -> dict[str, Any]:
-        value = {
-            "type": "user_goal",
-            "source": "goa.memory",
-            "user_id": str(user_id),
-            "goal_id": str(goal_id),
-            "title": goal.get("title", ""),
-            "description": goal.get("description", ""),
-            "status": goal.get("status", "proposed"),
-            "progress_summary": goal.get("progress_summary", ""),
-            "completed_steps": goal.get("completed_steps") or [],
-            "current_step": goal.get("current_step", ""),
-            "next_action": goal.get("next_action", ""),
-            "interest_signals": goal.get("interest_signals") or [],
-            "created_at": goal.get("created_at") or self._now(),
-            "updated_at": self._now(),
-        }
-        if goal.get("archived_reason"):
-            value["archived_reason"] = goal["archived_reason"]
-        return value
-
-    def _parse_entry(self, entry: dict[str, Any]) -> Optional[Dict[str, Any]]:
-        key = entry.get("key", "")
-        goal_id = key.rsplit(":", 1)[-1] if ":" in key else ""
-        raw_value = entry.get("value")
-
-        if isinstance(raw_value, dict) and raw_value.get("type") == "user_goal":
-            goal = dict(raw_value)
-            goal_id = str(goal.get("goal_id") or goal_id)
-        elif isinstance(raw_value, dict):
-            goal = dict(raw_value)
-            goal_id = str(goal.get("goal_id") or goal_id)
-        else:
-            logger.warning("Skipping malformed Goa goal entry: %s", key)
-            return None
-
-        if not goal_id or not goal.get("title"):
-            logger.warning("Skipping malformed Goa goal entry: %s", key)
+    def _normalize_goal(self, goal: dict[str, Any]) -> Optional[Dict[str, Any]]:
+        goal_id = str(goal.get("goal_id") or "")
+        title = str(goal.get("title") or "")
+        if not goal_id or not title:
+            logger.warning("Skipping malformed Supabase goal state entry: %s", goal)
             return None
 
         status = str(goal.get("status") or "proposed")
         if status not in SUPPORTED_GOAL_STATUSES:
             status = "proposed"
 
-        return {
+        normalized = {
             "goal_id": goal_id,
-            "title": str(goal.get("title") or ""),
+            "title": title,
             "description": str(goal.get("description") or ""),
             "status": status,
             "progress_summary": str(goal.get("progress_summary") or ""),
@@ -152,27 +80,64 @@ class GoalService:
             "interest_signals": self._as_list(goal.get("interest_signals")),
             "created_at": str(goal.get("created_at") or ""),
             "updated_at": str(goal.get("updated_at") or ""),
-            **(
-                {"archived_reason": str(goal.get("archived_reason"))}
-                if goal.get("archived_reason")
-                else {}
-            ),
         }
+        if goal.get("archived_reason"):
+            normalized["archived_reason"] = str(goal.get("archived_reason"))
+        return normalized
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=30.0, headers=self._headers()) as client:
-            response = await client.request(method, f"{self._goa_url}{path}", **kwargs)
+    def _goal_value(self, goal_id: str, goal: Dict[str, Any]) -> dict[str, Any]:
+        now = self._now()
+        value = {
+            "goal_id": str(goal_id),
+            "title": goal.get("title", ""),
+            "description": goal.get("description", ""),
+            "status": goal.get("status", "proposed"),
+            "progress_summary": goal.get("progress_summary", ""),
+            "completed_steps": goal.get("completed_steps") or [],
+            "current_step": goal.get("current_step", ""),
+            "next_action": goal.get("next_action", ""),
+            "interest_signals": goal.get("interest_signals") or [],
+            "created_at": goal.get("created_at") or now,
+            "updated_at": now,
+        }
+        if goal.get("archived_reason"):
+            value["archived_reason"] = goal["archived_reason"]
+        return value
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            body = response.text.strip()
-            raise RuntimeError(
-                f"Goa goal request failed: {method} {path} -> "
-                f"HTTP {response.status_code} {response.reason_phrase}: {body or '<empty>'}"
-            ) from exc
+    async def _load_state(self, user_id: str) -> tuple[Optional[int], dict[str, Any]]:
+        result = (
+            self._client.table("adk_sessions")
+            .select("id,state")
+            .eq("session_id", self._session_id(user_id))
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        if not rows:
+            return None, {"goals": []}
+        state = rows[0].get("state") or {}
+        if not isinstance(state, dict):
+            state = {"goals": []}
+        state.setdefault("goals", [])
+        return rows[0]["id"], state
 
-        return response
+    async def _save_state(self, user_id: str, row_id: Optional[int], state: dict[str, Any]) -> None:
+        payload = {
+            "session_id": self._session_id(user_id),
+            "app_name": self._app_name,
+            "user_id": str(user_id),
+            "state": state,
+            "updated_at": self._now(),
+        }
+        if row_id is None:
+            self._client.table("adk_sessions").insert(payload).execute()
+        else:
+            (
+                self._client.table("adk_sessions")
+                .update(payload)
+                .eq("id", row_id)
+                .execute()
+            )
 
     async def _get_next_goal_id(self, user_id: str) -> str:
         goals = await self.get_goals(user_id)
@@ -184,28 +149,20 @@ class GoalService:
         user_id: str,
         statuses: Optional[Sequence[str]] = None,
     ) -> List[Dict[str, Any]]:
-        response = await self._request(
-            "GET",
-            "/memory",
-            params={"prefix": self._goal_prefix(user_id)},
-        )
-        entries = response.json().get("entries", [])
-        goals = [parsed for entry in entries if (parsed := self._parse_entry(entry))]
+        _, state = await self._load_state(user_id)
+        goals = [
+            parsed
+            for goal in (state.get("goals") or [])
+            if isinstance(goal, dict) and (parsed := self._normalize_goal(goal))
+        ]
         if statuses is not None:
             status_set = set(statuses)
             goals = [goal for goal in goals if goal["status"] in status_set]
         return sorted(goals, key=lambda goal: self._goal_number(goal["goal_id"]))
 
     async def get_goal(self, user_id: str, goal_id: str) -> Optional[Dict[str, Any]]:
-        response = await self._request(
-            "GET",
-            "/memory",
-            params={"key": self._goal_key(user_id, goal_id)},
-        )
-        entries = response.json().get("entries", [])
-        if not entries:
-            return None
-        return self._parse_entry(entries[0])
+        goals = await self.get_goals(user_id)
+        return next((goal for goal in goals if goal["goal_id"] == goal_id), None)
 
     async def create_goal(
         self,
@@ -217,74 +174,76 @@ class GoalService:
         if status not in SUPPORTED_GOAL_STATUSES:
             raise ValueError(f"Unsupported goal status: {status}")
 
-        goal_id = await self._get_next_goal_id(user_id)
-        goal = self._goal_value(
-            user_id,
-            goal_id,
-            {
-                "title": title,
-                "description": description,
-                "status": status,
-                "created_at": self._now(),
-            },
+        row_id, state = await self._load_state(user_id)
+        goals = [
+            parsed
+            for goal in (state.get("goals") or [])
+            if isinstance(goal, dict) and (parsed := self._normalize_goal(goal))
+        ]
+        max_num = max((self._goal_number(goal["goal_id"]) for goal in goals), default=0)
+        goal_id = f"goal-{max_num + 1:02d}"
+        goals.append(
+            self._goal_value(
+                goal_id,
+                {
+                    "title": title,
+                    "description": description,
+                    "status": status,
+                    "created_at": self._now(),
+                },
+            )
         )
-        await self._request(
-            "POST",
-            "/memory",
-            json={
-                "key": self._goal_key(user_id, goal_id),
-                "value": goal,
-                "tags": self._goal_tags(user_id, goal_id, status),
-            },
-        )
-        logger.debug("Created Goa goal %s for user %s", goal_id, user_id)
+        state["goals"] = goals
+        await self._save_state(user_id, row_id, state)
+        logger.debug("Created goal %s for user %s", goal_id, user_id)
         return goal_id
 
     async def update_goal(self, user_id: str, goal_id: str, updates: Dict[str, Any]) -> bool:
-        existing = await self.get_goal(user_id, goal_id)
-        if not existing:
-            return False
+        row_id, state = await self._load_state(user_id)
+        goals = [
+            parsed
+            for goal in (state.get("goals") or [])
+            if isinstance(goal, dict) and (parsed := self._normalize_goal(goal))
+        ]
+        for index, existing in enumerate(goals):
+            if existing["goal_id"] != goal_id:
+                continue
 
-        clean_updates = {k: v for k, v in updates.items() if v is not None}
-        if clean_updates.get("interest_signals"):
-            clean_updates["interest_signals"] = [
-                *(existing.get("interest_signals") or []),
-                *list(clean_updates["interest_signals"]),
-            ]
-        updated = {**existing, **clean_updates}
-        status = updated.get("status", "proposed")
-        if status not in SUPPORTED_GOAL_STATUSES:
-            raise ValueError(f"Unsupported goal status: {status}")
+            clean_updates = {key: value for key, value in updates.items() if value is not None}
+            if clean_updates.get("interest_signals"):
+                clean_updates["interest_signals"] = [
+                    *(existing.get("interest_signals") or []),
+                    *list(clean_updates["interest_signals"]),
+                ]
+            updated = {**existing, **clean_updates}
+            status = updated.get("status", "proposed")
+            if status not in SUPPORTED_GOAL_STATUSES:
+                raise ValueError(f"Unsupported goal status: {status}")
 
-        value = self._goal_value(user_id, goal_id, updated)
-        await self._request(
-            "POST",
-            "/memory",
-            json={
-                "key": self._goal_key(user_id, goal_id),
-                "value": value,
-                "tags": self._goal_tags(user_id, goal_id, status),
-            },
-        )
-        logger.debug("Updated Goa goal %s for user %s", goal_id, user_id)
-        return True
-
-    async def delete_goal(self, user_id: str, goal_id: str) -> bool:
-        response = await self._request(
-            "DELETE",
-            "/memory",
-            params={"key": self._goal_key(user_id, goal_id)},
-        )
-        deleted = response.json().get("deleted", 0)
-        if deleted:
-            logger.debug("Deleted Goa goal %s for user %s", goal_id, user_id)
+            goals[index] = self._goal_value(goal_id, updated)
+            state["goals"] = goals
+            await self._save_state(user_id, row_id, state)
+            logger.debug("Updated goal %s for user %s", goal_id, user_id)
             return True
         return False
 
+    async def delete_goal(self, user_id: str, goal_id: str) -> bool:
+        row_id, state = await self._load_state(user_id)
+        goals = [
+            parsed
+            for goal in (state.get("goals") or [])
+            if isinstance(goal, dict) and (parsed := self._normalize_goal(goal))
+        ]
+        remaining = [goal for goal in goals if goal["goal_id"] != goal_id]
+        if len(remaining) == len(goals):
+            return False
+        state["goals"] = remaining
+        await self._save_state(user_id, row_id, state)
+        logger.debug("Deleted goal %s for user %s", goal_id, user_id)
+        return True
+
     async def clear_goals(self, user_id: str) -> None:
-        await self._request(
-            "DELETE",
-            "/memory",
-            params={"prefix": self._goal_prefix(user_id)},
-        )
-        logger.info("Cleared all Goa goals for user %s", user_id)
+        row_id, state = await self._load_state(user_id)
+        state["goals"] = []
+        await self._save_state(user_id, row_id, state)
+        logger.info("Cleared all goals for user %s", user_id)

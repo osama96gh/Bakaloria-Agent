@@ -1,6 +1,4 @@
-"""
-Telegram bot handlers for messages and commands, acting purely as a delivery hub to Goa.
-"""
+"""Telegram bot handlers for messages and commands."""
 
 import asyncio
 import json
@@ -8,14 +6,12 @@ import logging
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
-import httpx
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.error import BadRequest, TimedOut
 from telegram.ext import ContextTypes
 
-from .config import GOA_URL, GOA_API_KEY, BULBUL_PARTICIPANT_ID
 from .utils import (
     format_error_message,
     log_user_interaction,
@@ -30,6 +26,7 @@ from .ui import (
     goal_card_text,
 )
 from bulbul_agent.core.outreach_service import outreach_service
+from bulbul_agent.core.local_runtime import ask_local_agent, reset_local_session as reset_bulbul_session
 
 logger = logging.getLogger(__name__)
 
@@ -41,64 +38,24 @@ DYNAMIC_UI_ACTION_TTL_SECONDS = 15 * 60
 DYNAMIC_UI_ACTIONS: Dict[str, Dict[str, Any]] = {}
 
 
-async def _goa_request(method: str, path: str, **kwargs) -> httpx.Response:
-    """Helper for making requests to the Goa API."""
-    headers = kwargs.pop("headers", {})
-    headers["Authorization"] = f"Bearer {GOA_API_KEY}"
-    if "files" not in kwargs:
-        headers["Content-Type"] = "application/json"
-    
-    url = f"{GOA_URL}{path}"
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await client.request(method, url, headers=headers, **kwargs)
-
-
-async def get_or_create_goa_task(
+async def get_or_create_local_session(
     user_id: int,
     purpose: str = "chat",
     parent_task_id: Optional[str] = None,
 ) -> str:
-    """Finds or creates a Goa task for the Telegram user and purpose."""
-    external_ref = f"telegram_{user_id}"
-    if purpose != "chat":
-        external_ref = f"{external_ref}_{purpose}"
-
-    on_create = {}
-    if parent_task_id:
-        on_create["parent_task_id"] = parent_task_id
-        on_create["subject"] = f"{purpose} for telegram_{user_id}"
-
-    payload = {
-        "external_ref": external_ref,
-        "on_create": on_create
-    }
-    resp = await _goa_request("POST", "/tasks/upsert", json=payload)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["task"]["id"]
+    """Return the local session key for a Telegram user."""
+    return str(user_id)
 
 
-async def close_goa_task(task_id: str) -> bool:
-    """Close a Goa task by id."""
-    try:
-        resp = await _goa_request("POST", f"/tasks/{task_id}/close")
-        resp.raise_for_status()
-        logger.info(f"Closed Goa task {task_id}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to close Goa task {task_id}: {e}")
-        return False
+async def close_local_session(session_id: str) -> bool:
+    """No-op close hook for local outreach turns."""
+    return True
 
 
-async def reset_goa_task(user_id: int) -> bool:
-    """Closes the current Goa task for the user, forcing a fresh session on next upsert."""
-    try:
-        task_id = await get_or_create_goa_task(user_id)
-        return await close_goa_task(task_id)
-    except Exception as e:
-        logger.error(f"Failed to reset task for user {user_id}: {e}")
-        return False
+async def reset_local_session_history(user_id: int) -> bool:
+    """Reset the in-process conversation history for a user."""
+    reset_bulbul_session(user_id)
+    return True
 
 
 def record_user_engagement(update: Update) -> None:
@@ -113,77 +70,24 @@ def record_user_engagement(update: Update) -> None:
     )
 
 
-async def ask_agent_via_goa(
-    task_id: str,
+async def ask_agent(
+    session_id: str,
     text: str,
     image_bytes: Optional[bytes] = None,
     image_mime: str = "",
     progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> dict:
-    """Sends a QuestionEvent to Goa and polls for the AnswerEvent."""
+    """Ask the local Bulbul runtime directly."""
     try:
-        attachments = []
-        if image_bytes:
-            files = {"file": ("image", image_bytes, image_mime)}
-            blob_resp = await _goa_request("POST", f"/tasks/{task_id}/blobs", files=files)
-            blob_resp.raise_for_status()
-            attachment = blob_resp.json()
-            attachments.append(attachment)
-            logger.info(f"Uploaded blob {attachment['blob_id']} to task {task_id}")
-        
-        # 1. Post the Question
-        question_payload = {
-            "event_type": "question",
-            "content": {
-                "text": text,
-                "attachments": attachments
-            },
-            "payload": {
-                "to": [BULBUL_PARTICIPANT_ID]
-            }
-        }
-        
-        q_resp = await _goa_request("POST", f"/tasks/{task_id}/events", json=question_payload)
-        q_resp.raise_for_status()
-        question_event = q_resp.json()["event"]
-        question_id = question_event["id"]
-        
-        logger.info(f"Posted QuestionEvent {question_id} to task {task_id}")
-        
-        # 2. Poll for the Answer
-        max_polls = 120  # 1 minute max (poll every 0.5s)
-        seen_progress_event_ids = set()
-        for _ in range(max_polls):
-            await asyncio.sleep(0.5)
-            events_resp = await _goa_request("GET", f"/tasks/{task_id}")
-            if events_resp.status_code != 200:
-                continue
-                
-            events = events_resp.json().get("events", [])
-            for ev in events:
-                if (
-                    progress_callback
-                    and ev.get("event_type") == "progress"
-                    and ev.get("in_reply_to") == question_id
-                    and ev.get("id") not in seen_progress_event_ids
-                ):
-                    progress_text = ev.get("content", {}).get("text", "").strip()
-                    seen_progress_event_ids.add(ev.get("id"))
-                    if progress_text:
-                        await progress_callback(progress_text)
-
-                if ev.get("event_type") == "answer" and ev.get("in_reply_to") == question_id:
-                    answer_text = ev.get("content", {}).get("text", "")
-                    return {
-                        "status": "success",
-                        "response": answer_text,
-                        "ui": ev.get("metadata", {}).get("ui"),
-                    }
-                    
-        return {"status": "error", "error": "Timeout waiting for agent response"}
-        
+        return await ask_local_agent(
+            user_id=session_id,
+            text=text,
+            image_bytes=image_bytes,
+            image_mime=image_mime,
+            progress_callback=progress_callback,
+        )
     except Exception as e:
-        logger.error(f"Error communicating with Goa: {e}")
+        logger.error(f"Error running local Bulbul agent: {e}")
         return {"status": "error", "error": str(e)}
 
 
@@ -472,9 +376,9 @@ async def send_agent_text(
     typing_stop = asyncio.Event()
     typing_task = asyncio.create_task(keep_typing(context.bot, chat_id, typing_stop))
     try:
-        task_id = await get_or_create_goa_task(user_id)
-        result = await ask_agent_via_goa(
-            task_id,
+        session_id = await get_or_create_local_session(user_id)
+        result = await ask_agent(
+            session_id,
             query_text,
             progress_callback=lambda message: send_progress_update(
                 context=context,
@@ -535,7 +439,7 @@ async def download_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def forward_to_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, query_text: str, photo_bytes: Optional[bytes] = None, mime_type: str = "") -> None:
-    """Core logic to forward any message/command to Goa and return the agent's response."""
+    """Core logic to forward any message/command to the local agent."""
     if not update.effective_user or not update.effective_chat or not update.message:
         return
         
@@ -547,9 +451,9 @@ async def forward_to_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, q
             keep_typing(context.bot, update.effective_chat.id, typing_stop)
         )
         try:
-            task_id = await get_or_create_goa_task(user_id)
-            result = await ask_agent_via_goa(
-                task_id,
+            session_id = await get_or_create_local_session(user_id)
+            result = await ask_agent(
+                session_id,
                 query_text,
                 photo_bytes,
                 mime_type,
@@ -840,8 +744,8 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.message:
         record_user_engagement(update)
-        # Reset the Goa task on our side so we get a fresh session
-        reset_succeeded = await reset_goa_task(update.effective_user.id)
+        # Reset local conversation history so we get a fresh session.
+        reset_succeeded = await reset_local_session_history(update.effective_user.id)
         if not reset_succeeded:
             await send_reply_with_retry(
                 update.message,
@@ -862,8 +766,8 @@ async def reset_persona_command(update: Update, context: ContextTypes.DEFAULT_TY
     if update.effective_user and update.message:
         record_user_engagement(update)
         await forward_to_agent(update, context, "/reset_persona")
-        # The agent handles resetting the persona in Goa. We also reset the task.
-        reset_succeeded = await reset_goa_task(update.effective_user.id)
+        # The agent handles resetting the persona. We also reset conversation history.
+        reset_succeeded = await reset_local_session_history(update.effective_user.id)
         if not reset_succeeded:
             await send_reply_with_retry(
                 update.message,
@@ -926,10 +830,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await send_reply_with_retry(update.message, "عذراً، الرسالة الصوتية طويلة جداً. الحد الأقصى هو ٢ دقيقة.", parse_mode=None)
             return
             
-        # Note: Depending on your exact infrastructure, you might want to either:
-        # A. Transcribe locally in telegram service and pass text to Goa
-        # B. Send audio blob to Goa and let Agent handle transcription
-        # For simplicity here (assuming Agent handles it or you have local transcription package):
+        # Transcribe locally in the Telegram service and pass text to Bulbul.
         from .transcription import transcribe_audio
         transcription_result = await transcribe_audio(audio_data=audio_bytes, mime_type=mime_type, language_code="ar-XA")
         

@@ -1,9 +1,4 @@
-"""
-Telegram Bot for Educational Assistant Agent.
-
-Main entry point for the Telegram bot application. This acts purely as an
-interface to Goa, sending all messages and commands to the bulbul agent.
-"""
+"""Telegram Bot for Educational Assistant Agent."""
 
 import asyncio
 import logging
@@ -22,10 +17,10 @@ from telegram.ext import (
 )
 
 from .telegram_bot.handlers import (
-    ask_agent_via_goa,
-    close_goa_task,
+    ask_agent,
+    close_local_session,
     error_handler,
-    get_or_create_goa_task,
+    get_or_create_local_session,
     callback_query_handler,
     handle_message,
     handle_photo_message,
@@ -68,21 +63,8 @@ async def setup_bot_commands(application: Application) -> None:
 
 
 async def get_or_create_outreach_task(user_id: int) -> str:
-    """Create an outreach task linked to the active chat task when Goa allows it."""
-    main_task_id = await get_or_create_goa_task(user_id)
-    try:
-        return await get_or_create_goa_task(
-            user_id,
-            purpose="outreach",
-            parent_task_id=main_task_id,
-        )
-    except Exception as e:
-        logger.warning(
-            "Failed to create parented outreach task for user %s; falling back: %s",
-            user_id,
-            e,
-        )
-        return await get_or_create_goa_task(user_id, purpose="outreach")
+    """Return the local session key used for proactive outreach."""
+    return await get_or_create_local_session(user_id, purpose="outreach")
 
 
 def _build_outreach_prompt(hours_inactive: float) -> str:
@@ -129,14 +111,14 @@ async def outreach_job(context: CallbackContext) -> None:
         ).total_seconds() / 3600
 
         try:
-            task_id = await get_or_create_outreach_task(int(user_id))
+            session_id = await get_or_create_outreach_task(int(user_id))
             try:
-                result = await ask_agent_via_goa(
-                    task_id,
+                result = await ask_agent(
+                    session_id,
                     _build_outreach_prompt(hours_inactive),
                 )
             finally:
-                await close_goa_task(task_id)
+                await close_local_session(session_id)
 
             if result["status"] != "success":
                 logger.warning(

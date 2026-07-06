@@ -15,7 +15,6 @@
 """Service module for exposing the customizable Bulbul agent."""
 
 import logging
-import os
 from pathlib import Path
 
 from google.adk.agents.llm_agent import Agent
@@ -34,25 +33,9 @@ from .tools.goal_tool import manage_goal
 logger = logging.getLogger(__name__)
 
 # Module-level services - persist across the app lifecycle
-_goa_url = os.getenv("GOA_URL")
-_goa_api_key = os.getenv("GOA_AGENT_API_KEY") or os.getenv("GOA_API_KEY")
-
-# Initialize persona service
-_persona_service = PersonaService(
-    goa_url=_goa_url,
-    goa_api_key=_goa_api_key,
-)
-
-# Initialize memory service
-_memory_service = MemoryService(
-    goa_url=_goa_url,
-    goa_api_key=_goa_api_key,
-)
-
-_goal_service = GoalService(
-    goa_url=_goa_url,
-    goa_api_key=_goa_api_key,
-)
+_persona_service = PersonaService()
+_memory_service = MemoryService()
+_goal_service = GoalService()
 
 # Sub-agents for built-in tools (isolated to avoid function calling conflicts)
 _search_agent = Agent(

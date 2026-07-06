@@ -24,17 +24,10 @@ for env_path in env_paths:
 # Environment variables validation
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Goa Configuration
-GOA_URL = os.getenv("GOA_URL", "http://195.35.0.64").rstrip("/")
-GOA_API_KEY = os.getenv("GOA_API_KEY")
-BULBUL_PARTICIPANT_ID = os.getenv("BULBUL_PARTICIPANT_ID", "923dc787-d276-43be-a52d-bea462561bad") # The agent's ID
-
 # Validate required environment variables
 missing_vars = []
 if not TELEGRAM_BOT_TOKEN:
     missing_vars.append("TELEGRAM_BOT_TOKEN: Get from @BotFather on Telegram")
-if not GOA_API_KEY:
-    missing_vars.append("GOA_API_KEY: Need Goa API key for telegram-bot participant")
 
 if missing_vars:
     error_msg = "Missing required environment variables:\n" + "\n".join(
