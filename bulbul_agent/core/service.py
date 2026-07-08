@@ -19,13 +19,13 @@ from pathlib import Path
 
 from google.adk.agents.llm_agent import Agent
 from google.adk.code_executors import BuiltInCodeExecutor
-from google.adk.models import Gemini
 from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.google_search_tool import GoogleSearchTool
 
 from .persona_service import PersonaService
 from .memory_service import MemoryService
 from .goal_service import GoalService
+from .model_config import build_gemini_fallback_model, build_text_model
 from .tools.persona_tool import update_persona
 from .tools.memory_tool import manage_memory
 from .tools.goal_tool import manage_goal
@@ -39,7 +39,7 @@ _goal_service = GoalService()
 
 # Sub-agents for built-in tools (isolated to avoid function calling conflicts)
 _search_agent = Agent(
-    model=Gemini(model='gemini-3.1-pro-preview'),
+    model=build_gemini_fallback_model(),
     name="google_search",
 
     description=(
@@ -55,7 +55,7 @@ _search_agent = Agent(
 )
 
 _code_agent = Agent(
-    model=Gemini(model='gemini-3.1-pro-preview'),
+    model=build_gemini_fallback_model(),
     name="code_executor",
 
     description=(
@@ -73,7 +73,7 @@ _code_agent = Agent(
 # Create agent once at module level
 _prompt_file = Path(__file__).parent / "instruction.md"
 _agent = Agent(
-    model=Gemini(model='gemini-3.1-pro-preview'),
+    model=build_text_model(),
     name="bulbul",
 
     instruction=_prompt_file.read_text(encoding="utf-8") if _prompt_file.exists() else "أنت مساعد ذكي.",

@@ -13,7 +13,6 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from google.adk.agents.llm_agent import Agent
 from google.adk.code_executors import BuiltInCodeExecutor
 from google.adk.events import Event, EventActions
-from google.adk.models import Gemini
 from google.adk.runners import Runner
 from google.adk.sessions.base_session_service import (
     BaseSessionService,
@@ -26,6 +25,7 @@ from google.genai import types
 
 from .goal_service import GoalService
 from .memory_service import MemoryService
+from .model_config import build_gemini_fallback_model, build_text_model
 from .persona_service import PersonaService
 from .tools.goal_tool import init_goal_tool, manage_goal
 from .tools.memory_tool import init_memory_tool, manage_memory
@@ -105,16 +105,16 @@ class LocalSessionService(BaseSessionService):
         return event
 
 
-def _build_agent() -> Agent:
+def _build_agent(*, multimodal: bool = False) -> Agent:
     search_agent = Agent(
-        model=Gemini(model="gemini-3.1-pro-preview"),
+        model=build_gemini_fallback_model(),
         name="google_search",
         description="Search the web for current information, news, facts.",
         instruction="You are a search assistant. Use Google Search. Respond in Arabic.",
         tools=[GoogleSearchTool()],
     )
     code_agent = Agent(
-        model=Gemini(model="gemini-3.1-pro-preview"),
+        model=build_gemini_fallback_model(),
         name="code_executor",
         description="Execute Python code for math calculations, data analysis.",
         instruction="Write and execute Python code. Respond in Arabic.",
@@ -122,7 +122,7 @@ def _build_agent() -> Agent:
     )
     prompt_file = Path(__file__).parent / "instruction.md"
     return Agent(
-        model=Gemini(model="gemini-3.1-pro-preview"),
+        model=build_gemini_fallback_model() if multimodal else build_text_model(),
         name="bulbul",
         instruction=prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else "أنت مساعد ذكي.",
         description="assistant",
@@ -137,14 +137,19 @@ def _build_agent() -> Agent:
     )
 
 
-_agent: Optional[Agent] = None
+_text_agent: Optional[Agent] = None
+_multimodal_agent: Optional[Agent] = None
 
 
-def _agent_instance() -> Agent:
-    global _agent
-    if _agent is None:
-        _agent = _build_agent()
-    return _agent
+def _agent_instance(*, multimodal: bool = False) -> Agent:
+    global _text_agent, _multimodal_agent
+    if multimodal:
+        if _multimodal_agent is None:
+            _multimodal_agent = _build_agent(multimodal=True)
+        return _multimodal_agent
+    if _text_agent is None:
+        _text_agent = _build_agent()
+    return _text_agent
 
 
 def _format_goals_for_state(goals: List[dict]) -> str:
@@ -366,7 +371,11 @@ async def ask_local_agent(
         state=initial_state,
         events=_SESSION_EVENTS.get(user_id_str, []),
     )
-    runner = Runner(agent=_agent_instance(), app_name=APP_NAME, session_service=session)
+    runner = Runner(
+        agent=_agent_instance(multimodal=bool(image_bytes)),
+        app_name=APP_NAME,
+        session_service=session,
+    )
 
     parts = []
     if query_text:

@@ -18,8 +18,8 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-# Latest Gemini image generation model
-IMAGE_MODEL = "gemini-3-pro-image-preview"
+# Lower-cost Gemini image generation model
+IMAGE_MODEL = os.getenv("BULBUL_IMAGE_MODEL", "gemini-3.1-flash-lite-image")
 
 # Bulbul profile picture prompt
 BULBUL_PROMPT = """
