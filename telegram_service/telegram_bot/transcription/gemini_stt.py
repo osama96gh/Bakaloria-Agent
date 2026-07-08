@@ -15,7 +15,7 @@ from .base import STTProvider, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_STT_MODEL = "gemini-flash-latest"
+DEFAULT_GEMINI_STT_MODEL = "gemini-3.1-flash-lite"
 GEMINI_STT_MODEL_ENV = "GEMINI_TRANSCRIPTION_MODEL"
 
 
@@ -29,7 +29,7 @@ class GeminiSTTProvider(STTProvider):
         Args:
             api_key: Gemini API key. If not provided, uses GEMINI_API_KEY env var.
             model: Gemini model to use. If not provided, uses
-                GEMINI_TRANSCRIPTION_MODEL or Google's latest Flash alias.
+                GEMINI_TRANSCRIPTION_MODEL or Gemini Flash-Lite.
         """
         self._api_key = api_key or os.getenv("GEMINI_API_KEY")
         self._model = model or os.getenv(GEMINI_STT_MODEL_ENV, DEFAULT_GEMINI_STT_MODEL)
